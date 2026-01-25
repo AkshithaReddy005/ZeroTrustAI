@@ -193,17 +193,14 @@ An AI-powered NGFW that integrates **Deep Learning (DL)**, **Natural Language Pr
 
 ```bash
 # Clone the repository
-git clone https://github.com/AkshithaReddy005/ZeroTrust-AI---Never-Trust.-Always-Verify..git
-cd ZeroTrust-AI---Never-Trust.-Always-Verify.
+git clone https://github.com/AkshithaReddy005/ZeroTrust-AI.git
+cd ZeroTrust-AI
 
-# Install dependencies
-pip install -r requirements.txt
-
-# Configure environment variables
-cp .env.example .env
-nano .env
+# Start the services
+docker compose up --build -d
 ```
 
+## ML Detector Usage
 ### Quick Start
 
 ```bash
