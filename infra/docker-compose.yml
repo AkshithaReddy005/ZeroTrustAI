@@ -8,10 +8,12 @@ services:
       - "8000:8000"
     environment:
       - PYTHONUNBUFFERED=1
+      - DETECTOR_URL=http://detector:9000
     volumes:
       - ../shared:/app/shared:ro
     depends_on:
       - redis
+      - detector
 
   dashboard:
     build: ../apps/dashboard
@@ -43,6 +45,18 @@ services:
       - ../data:/data:ro
     depends_on:
       - api
+
+  detector:
+    build: ../services/detector
+    container_name: ztai_detector
+    ports:
+      - "9000:9000"
+    environment:
+      - PYTHONUNBUFFERED=1
+      - MODEL_DIR=/models
+    volumes:
+      - ../shared:/app/shared:ro
+      - ../models:/models
 
   redis:
     image: redis:7-alpine
