@@ -23,6 +23,27 @@ services:
     depends_on:
       - api
 
+  collector:
+    build: ../services/collector
+    container_name: ztai_collector
+    environment:
+      - API_BASE_URL=http://api:8000
+      - EMIT_INTERVAL_MS=1000
+    depends_on:
+      - api
+
+  pcap_replay:
+    build: ../services/pcap-replay
+    container_name: ztai_pcap_replay
+    environment:
+      - API_BASE_URL=http://api:8000
+      - FILE_GLOB=/data/raw/*.pcap
+      - THROTTLE_MS=50
+    volumes:
+      - ../data:/data:ro
+    depends_on:
+      - api
+
   redis:
     image: redis:7-alpine
     container_name: ztai_redis
