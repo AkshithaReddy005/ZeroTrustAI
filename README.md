@@ -186,41 +186,60 @@ An AI-powered NGFW that integrates **Deep Learning (DL)**, **Natural Language Pr
 
 - Python 3.9+
 - Docker & Docker Compose
-- Kubernetes (optional, for cloud deployments)
+- WSL2 (for packet capture on Windows)
 - GPU support recommended (NVIDIA CUDA for ML acceleration)
 
-### Installation
+### Quick Start
 
 ```bash
 # Clone the repository
 git clone https://github.com/AkshithaReddy005/ZeroTrust-AI.git
 cd ZeroTrust-AI
 
-# Start the services
+# Start all services (with memory limits)
 docker compose up --build -d
-```
-
-## ML Detector Usage
-### Quick Start
-
-```bash
-# Start the NGFW service
-docker-compose up -d
 
 # Verify deployment
-docker-compose ps
+docker compose ps
 
-# Access dashboard
-open http://localhost:8080
+# Access services
+# Dashboard: http://localhost:8501
+# API: http://localhost:8000
+# Detector: http://localhost:9000
+# InfluxDB: http://localhost:8086
 ```
+
+### Architecture Overview
+
+This is a **4-week implementation** featuring:
+
+**Week 1**: NFStream-based SPLT feature extraction + TCN + Autoencoder + Isolation Forest
+**Week 2**: Real-time detection + TTL-based risk scoring + SOAR with manual override
+**Week 3**: Federated learning + MITRE ATT&CK dashboard + database integration
+**Week 4**: REST API + stress testing + memory profiling + performance optimization
+
+### Key Features
+
+- **Real-time Packet Capture**: NFStream with TLS 1.3 support
+- **Advanced ML Models**: Temporal Convolutional Network (TCN) + Autoencoder + Isolation Forest
+- **Zero Trust Policy Engine**: Risk-based decisions with TTL decay
+- **SOAR Automation**: Human-in-the-loop with manual override
+- **Federated Learning**: Privacy-preserving collaborative intelligence
+- **MITRE ATT&CK Integration**: Automated threat mapping
+- **Memory-Limited Containers**: Prevent leaks with 4GB/2GB/3GB limits
+- **24-Hour Stress Testing**: Prove stability with flat memory usage
+
+### Implementation Plan
+
+See [PLAN.md](PLAN.md) for detailed 4-week implementation schedule.
 
 ### Configuration
 
-Refer to `config/` directory for:
-- Network policies
-- ML model parameters
-- Threat intelligence feeds
-- SIEM integration settings
+- **Memory Limits**: API/Detector (4GB), Redis (2GB), InfluxDB (3GB)
+- **Dataset**: CSE-CIC-IDS2018 with TLS 1.3 traffic
+- **Models**: TCN classifier, Autoencoder, Isolation Forest ensemble
+- **Dashboard**: Streamlit with MITRE ATT&CK visualization
+- **API**: FastAPI with JWT authentication
 
 ---
 
