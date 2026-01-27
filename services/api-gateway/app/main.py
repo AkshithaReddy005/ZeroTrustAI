@@ -4,6 +4,9 @@ from pydantic import BaseModel
 import os
 import sys
 from typing import List
+import time
+import uuid
+import requests
 
 # Add shared module path (mounted by docker-compose)
 sys.path.append("/app/shared")
@@ -81,11 +84,39 @@ def list_events(limit: int = 100):
 @app.post("/events/flow")
 def add_flow_event(event: FlowFeatures):
     EVENTS.append({"type": "flow", "data": event.model_dump()})
+
+    detector_url = os.getenv("DETECTOR_URL", "http://localhost:9000")
+    threat_obj = None
+    try:
+        r = requests.post(f"{detector_url}/detect", json=event.model_dump(), timeout=2)
+        if r.ok:
+            threat_obj = r.json()
+    except Exception:
+        threat_obj = None
+
+    if threat_obj:
+        EVENTS.append({"type": "threat", "data": threat_obj})
+        if threat_obj.get("label") == "malicious":
+            inc = {
+                "incident_id": str(uuid.uuid4()),
+                "threat": threat_obj,
+                "actions": ["blocked", "quarantined"],
+                "timestamp": time.time(),
+            }
+            INCIDENTS.append(inc)
     return {"status": "ok"}
 
 @app.post("/events/threat")
 def add_threat_event(event: ThreatEvent):
     EVENTS.append({"type": "threat", "data": event.model_dump()})
+    if getattr(event, "label", None) == "malicious":
+        inc = {
+            "incident_id": str(uuid.uuid4()),
+            "threat": event.model_dump(),
+            "actions": ["blocked", "quarantined"],
+            "timestamp": time.time(),
+        }
+        INCIDENTS.append(inc)
     return {"status": "ok"}
 
 @app.get("/incidents")

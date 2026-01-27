@@ -26,6 +26,7 @@ data/processed/*
 !data/processed/.gitkeep
 models/*
 !models/.gitkeep
+*.parquet
 
 # Docker
 *.pid
