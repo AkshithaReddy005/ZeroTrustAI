@@ -1,0 +1,81 @@
+version: '3.9'
+
+services:
+  api:
+    build: ../services/api-gateway
+    container_name: ztai_api
+    ports:
+      - "8000:8000"
+    environment:
+      - PYTHONUNBUFFERED=1
+      - DETECTOR_URL=http://detector:9000
+    volumes:
+      - ../shared:/app/shared:ro
+    depends_on:
+      - redis
+      - detector
+    mem_limit: 4g
+
+  dashboard:
+    build: ../apps/dashboard
+    container_name: ztai_dashboard
+    ports:
+      - "8501:8501"
+    environment:
+      - API_BASE_URL=http://api:8000
+    depends_on:
+      - api
+
+  collector:
+    build: ../services/collector
+    container_name: ztai_collector
+    environment:
+      - API_BASE_URL=http://api:8000
+      - EMIT_INTERVAL_MS=1000
+    depends_on:
+      - api
+
+  pcap_replay:
+    build: ../services/pcap-replay
+    container_name: ztai_pcap_replay
+    environment:
+      - API_BASE_URL=http://api:8000
+      - FILE_GLOB=/data/raw/*.pcap
+      - THROTTLE_MS=50
+    volumes:
+      - ../data:/data:ro
+    depends_on:
+      - api
+
+  detector:
+    build: ../services/detector
+    container_name: ztai_detector
+    ports:
+      - "9000:9000"
+    environment:
+      - PYTHONUNBUFFERED=1
+      - MODEL_DIR=/models
+    volumes:
+      - ../shared:/app/shared:ro
+      - ../models:/models
+    mem_limit: 4g
+
+  redis:
+    image: redis:7-alpine
+    container_name: ztai_redis
+    ports:
+      - "6379:6379"
+    mem_limit: 2g
+
+  influxdb:
+    image: influxdb:2
+    container_name: ztai_influxdb
+    ports:
+      - "8086:8086"
+    volumes:
+      - ../influxdb:/var/lib/influxdb2
+    mem_limit: 3g
+
+networks:
+  default:
+    name: ztai_net
