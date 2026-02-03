@@ -8,6 +8,8 @@ import requests
 import random
 from typing import Tuple, Dict
 
+from math import log1p
+
 API_BASE = os.getenv("API_BASE_URL", "http://localhost:8000")
 FILE_GLOB = os.getenv("FILE_GLOB", "/data/raw/*.pcap")
 THROTTLE_MS = int(os.getenv("THROTTLE_MS", "25"))
@@ -52,6 +54,9 @@ def post_flow_event(flow_id: str, agg: Dict):
         "avg_entropy": agg.get("entropy_sum", 0.0) / max(agg.get("count", 1), 1),
         "syn_count": agg.get("syn", 0),
         "fin_count": agg.get("fin", 0),
+        # SPLT sequences (best-effort): first 20 signed log-scaled packet lengths and IATs
+        "splt_len": agg.get("splt_len", None),
+        "splt_iat": agg.get("splt_iat", None),
     }
     try:
         requests.post(f"{API_BASE}/events/flow", json=payload, timeout=3)
@@ -72,10 +77,38 @@ def process_pcap(path: str):
                 l4 = ip.data
                 key = flow_key(ip, l4)
                 fid = f"{key[0]}:{key[2]}->{key[1]}:{key[3]}/{key[4]}"
-                rec = flows.setdefault(fid, {"count": 0, "bytes": 0, "first_ts": ts, "last_ts": ts, "entropy_sum": 0.0, "syn": 0, "fin": 0})
+                rec = flows.setdefault(
+                    fid,
+                    {
+                        "count": 0,
+                        "bytes": 0,
+                        "first_ts": ts,
+                        "last_ts": ts,
+                        "entropy_sum": 0.0,
+                        "syn": 0,
+                        "fin": 0,
+                        "splt_len": [],
+                        "splt_iat": [],
+                        "last_pkt_ts": None,
+                        "client_ip": key[0],
+                    },
+                )
                 rec["count"] += 1
                 rec["bytes"] += len(buf)
                 rec["last_ts"] = ts
+
+                # SPLT capture (first 20)
+                if len(rec.get("splt_len", [])) < 20:
+                    # Direction: + for client->server (flow initiator), - for reverse
+                    src = inet_to_str(ip.src)
+                    direction = 1.0 if src == rec.get("client_ip") else -1.0
+                    rec["splt_len"].append(direction * log1p(len(buf)))
+                    last_pkt_ts = rec.get("last_pkt_ts")
+                    if last_pkt_ts is None:
+                        rec["splt_iat"].append(0.0)
+                    else:
+                        rec["splt_iat"].append(max(0.0, ts - float(last_pkt_ts)))
+                    rec["last_pkt_ts"] = ts
                 payload = b""
                 if isinstance(l4, (dpkt.tcp.TCP, dpkt.udp.UDP)):
                     payload = l4.data or b""

@@ -9,6 +9,7 @@ services:
     environment:
       - PYTHONUNBUFFERED=1
       - DETECTOR_URL=http://detector:9000
+      - ENABLE_FLOW_DETECTION=1
     volumes:
       - ../shared:/app/shared:ro
     depends_on:
@@ -32,8 +33,19 @@ services:
     environment:
       - API_BASE_URL=http://api:8000
       - EMIT_INTERVAL_MS=1000
+      - EMIT_THREATS=0
     depends_on:
       - api
+
+  # Utility container to run data scripts (dataset download, SPLT extraction)
+  data-worker:
+    image: python:3.10-slim
+    container_name: ztai_data_worker
+    working_dir: /work
+    command: ["sleep", "infinity"]
+    volumes:
+      - ..:/work
+    mem_limit: 4g
 
   pcap_replay:
     build: ../services/pcap-replay

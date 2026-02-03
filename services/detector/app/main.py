@@ -74,6 +74,12 @@ PT_PATH = os.path.join(MODEL_DIR, "pytorch_mlp.pt")
 FEEDBACK_PATH = os.path.join(MODEL_DIR, "feedback.jsonl")
 META_PATH = os.path.join(MODEL_DIR, "meta.json")
 
+TCN_PATH = os.path.join(MODEL_DIR, "tcn_classifier.pth")
+AE_PATH = os.path.join(MODEL_DIR, "autoencoder.pth")
+AE_THR_PATH = os.path.join(MODEL_DIR, "ae_threshold.txt")
+SPLT_SCALER_PATH = os.path.join(MODEL_DIR, "splt_scaler.joblib")
+SPLT_ISO_PATH = os.path.join(MODEL_DIR, "splt_isoforest.joblib")
+
 
 def flow_to_vec(f: FlowFeatures) -> np.ndarray:
     # stable, simple numeric vector
@@ -108,6 +114,81 @@ class MLP(nn.Module):
         return self.net(x)
 
 
+class Chomp1d(nn.Module):
+    def __init__(self, chomp_size: int):
+        super().__init__()
+        self.chomp_size = int(chomp_size)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if self.chomp_size <= 0:
+            return x
+        return x[:, :, :-self.chomp_size].contiguous()
+
+
+class TemporalBlock(nn.Module):
+    def __init__(self, in_ch: int, out_ch: int, kernel_size: int, dilation: int, dropout: float):
+        super().__init__()
+        pad = (kernel_size - 1) * dilation
+        self.net = nn.Sequential(
+            nn.Conv1d(in_ch, out_ch, kernel_size, padding=pad, dilation=dilation),
+            Chomp1d(pad),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Conv1d(out_ch, out_ch, kernel_size, padding=pad, dilation=dilation),
+            Chomp1d(pad),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+        )
+        self.downsample = nn.Conv1d(in_ch, out_ch, 1) if in_ch != out_ch else nn.Identity()
+        self.relu = nn.ReLU()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        out = self.net(x)
+        res = self.downsample(x)
+        return self.relu(out + res)
+
+
+class TCN(nn.Module):
+    def __init__(self, in_ch: int = 2, n_classes: int = 2, channels=(32, 64, 64), kernel_size: int = 3, dropout: float = 0.2):
+        super().__init__()
+        layers = []
+        ch_in = in_ch
+        ch_out = channels[-1]
+        for i, c in enumerate(channels):
+            layers.append(TemporalBlock(ch_in, c, kernel_size, dilation=2 ** i, dropout=dropout))
+            ch_in = c
+            ch_out = c
+        self.tcn = nn.Sequential(*layers)
+        self.head = nn.Sequential(
+            nn.AdaptiveAvgPool1d(1),
+            nn.Flatten(),
+            nn.Linear(ch_out, n_classes),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        z = self.tcn(x)
+        return self.head(z)
+
+
+class AE(nn.Module):
+    def __init__(self, in_ch: int = 2, latent: int = 32):
+        super().__init__()
+        self.enc = nn.Sequential(
+            nn.Conv1d(in_ch, 32, 3, padding=1), nn.ReLU(),
+            nn.Conv1d(32, 64, 3, padding=1), nn.ReLU(),
+            nn.Conv1d(64, latent, 3, padding=1), nn.ReLU(),
+        )
+        self.dec = nn.Sequential(
+            nn.Conv1d(latent, 64, 3, padding=1), nn.ReLU(),
+            nn.Conv1d(64, 32, 3, padding=1), nn.ReLU(),
+            nn.Conv1d(32, in_ch, 3, padding=1),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        z = self.enc(x)
+        return self.dec(z)
+
+
 def load_models() -> Tuple[Optional[StandardScaler], Optional[IsolationForest], Optional[MLP]]:
     scaler = None
     iso = None
@@ -122,6 +203,58 @@ def load_models() -> Tuple[Optional[StandardScaler], Optional[IsolationForest], 
         mlp.load_state_dict(state["state_dict"])
         mlp.eval()
     return scaler, iso, mlp
+
+
+def load_sequence_models() -> Tuple[Optional[TCN], Optional[AE], Optional[float], Optional[StandardScaler], Optional[IsolationForest]]:
+    tcn = None
+    ae = None
+    ae_thr = None
+    splt_scaler = None
+    splt_iso = None
+
+    if os.path.exists(TCN_PATH):
+        tcn = TCN()
+        state = torch.load(TCN_PATH, map_location="cpu")
+        tcn.load_state_dict(state)
+        tcn.eval()
+    if os.path.exists(AE_PATH):
+        ae = AE()
+        state = torch.load(AE_PATH, map_location="cpu")
+        ae.load_state_dict(state)
+        ae.eval()
+    if os.path.exists(AE_THR_PATH):
+        try:
+            ae_thr = float(open(AE_THR_PATH, "r", encoding="utf-8").read().strip())
+        except Exception:
+            ae_thr = None
+    if os.path.exists(SPLT_SCALER_PATH):
+        splt_scaler = joblib.load(SPLT_SCALER_PATH)
+    if os.path.exists(SPLT_ISO_PATH):
+        splt_iso = joblib.load(SPLT_ISO_PATH)
+    return tcn, ae, ae_thr, splt_scaler, splt_iso
+
+
+def flow_to_splt_tensor(flow: FlowFeatures, seq_len: int = 20) -> Optional[torch.Tensor]:
+    if getattr(flow, "splt_len", None) is None or getattr(flow, "splt_iat", None) is None:
+        return None
+    try:
+        l = list(flow.splt_len or [])[:seq_len]
+        t = list(flow.splt_iat or [])[:seq_len]
+        if len(l) == 0 and len(t) == 0:
+            return None
+        while len(l) < seq_len:
+            l.append(0.0)
+        while len(t) < seq_len:
+            t.append(0.0)
+        x = torch.tensor([l, t], dtype=torch.float32).unsqueeze(0)  # [1,2,T]
+        return x
+    except Exception:
+        return None
+
+
+def splt_vec_from_tensor(x: torch.Tensor) -> np.ndarray:
+    # x: [1,2,20]
+    return x.squeeze(0).reshape(-1).numpy().astype(np.float32)
 
 
 def save_mlp(mlp: MLP, in_dim: int):
@@ -185,11 +318,17 @@ app = FastAPI(title="ZT-AI Detector", version="0.2.0")
 @app.get("/health")
 def health():
     scaler, iso, mlp = load_models()
+    tcn, ae, ae_thr, splt_scaler, splt_iso = load_sequence_models()
     return {
         "status": "ok",
         "scaler": bool(scaler),
         "isolation_forest": bool(iso),
         "pytorch": bool(mlp),
+        "tcn": bool(tcn),
+        "autoencoder": bool(ae),
+        "ae_threshold": ae_thr,
+        "splt_scaler": bool(splt_scaler),
+        "splt_isoforest": bool(splt_iso),
         "model_dir": MODEL_DIR,
     }
 
@@ -273,10 +412,49 @@ def train(req: TrainRequest):
 @app.post("/detect", response_model=ThreatEvent)
 def detect(flow: FlowFeatures):
     scaler, iso, mlp = load_models()
+    tcn, ae, ae_thr, splt_scaler, splt_iso = load_sequence_models()
     x = flow_to_vec(flow)
 
     reasons: List[str] = []
-    # If models missing, require /train first (but still return something usable)
+    # Preferred path: sequence models when SPLT present AND models exist
+    x_seq = flow_to_splt_tensor(flow)
+    if x_seq is not None and tcn is not None and ae is not None and ae_thr is not None and splt_scaler is not None and splt_iso is not None:
+        with torch.no_grad():
+            logits = tcn(x_seq)
+            probs = torch.softmax(logits, dim=1).squeeze(0)
+            p_mal = float(probs[1].item())
+            xhat = ae(x_seq)
+            ae_err = float(((x_seq - xhat) ** 2).mean().item())
+
+        # Normalize AE error: ~0..1
+        ae_score = float(np.clip(ae_err / max(ae_thr, 1e-6), 0.0, 1.0))
+
+        # Isolation forest on SPLT
+        v = splt_vec_from_tensor(x_seq)
+        vs = splt_scaler.transform(v.reshape(1, -1)).reshape(-1)
+        iso_score = anomaly_score_from_iso(splt_iso, vs)
+
+        # Ensemble fusion
+        score = float(np.clip(0.50 * p_mal + 0.25 * ae_score + 0.25 * iso_score, 0.0, 1.0))
+        if p_mal >= 0.6:
+            reasons.append("tcn_malicious")
+        if ae_score >= 0.7:
+            reasons.append("ae_anomalous")
+        if iso_score >= 0.6:
+            reasons.append("isoforest_anomalous")
+
+        label = "malicious" if score >= 0.6 else "benign"
+        sev = severity_from_score(score)
+        return ThreatEvent(
+            flow_id=flow.flow_id,
+            label=label,
+            confidence=float(score),
+            anomaly_score=float(max(ae_score, iso_score)),
+            severity=sev,
+            reason=reasons or ["low_risk"],
+        )
+
+    # Fallback: legacy scalar models
     if scaler is None or iso is None or mlp is None:
         score = 0.5
         reasons.append("model_not_trained")

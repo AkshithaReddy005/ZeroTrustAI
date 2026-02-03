@@ -6,6 +6,7 @@ from datetime import datetime
 
 API_BASE = os.getenv("API_BASE_URL", "http://localhost:8000")
 INTERVAL_MS = int(os.getenv("EMIT_INTERVAL_MS", "1000"))
+EMIT_THREATS = os.getenv("EMIT_THREATS", "0").lower() in {"1", "true", "yes"}
 
 THREATS = [
     ("Port Scan", "HIGH"),
@@ -53,9 +54,12 @@ def emit_threat():
 
 def main():
     print(f"Collector posting to {API_BASE} every {INTERVAL_MS} ms")
+    if not EMIT_THREATS:
+        print("Auto threat emission disabled (EMIT_THREATS=0). Threats will only be processed when manually sent to the API.")
     while True:
         emit_flow()
-        if random.random() > 0.5:
+        # Only emit synthetic threats if explicitly enabled
+        if EMIT_THREATS and random.random() > 0.5:
             emit_threat()
         time.sleep(INTERVAL_MS / 1000.0)
 

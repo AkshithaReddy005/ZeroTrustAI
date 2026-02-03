@@ -23,6 +23,10 @@ class FlowFeatures(BaseModel):
     syn_count: int
     fin_count: int
 
+    # Optional SPLT sequences for sequence models (first N packets)
+    splt_len: Optional[List[float]] = None
+    splt_iat: Optional[List[float]] = None
+
 class ThreatEvent(BaseModel):
     flow_id: str
     label: Literal["benign", "malicious"]

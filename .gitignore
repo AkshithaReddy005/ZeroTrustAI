@@ -34,3 +34,6 @@ models/*
 # Captures (avoid committing large PCAPs)
 *.pcap
 *.pcapng
+
+# Experiment log (keep local only)
+EXPERIMENT_LOG.md

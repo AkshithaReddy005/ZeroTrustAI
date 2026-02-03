@@ -1,0 +1,17 @@
+# Small, well-known IDS datasets with PCAPs (useful for Day 2–4 SPLT extraction)
+# Choose one or more lines to download; you can comment out lines with #
+
+# UNSW-NB15 PCAPs (subset, ~200 MB)
+# https://research.unsw.edu.au/projects/unsw-nb15-dataset
+
+# CIC-IDS2017 PCAPs (small subset, ~100 MB)
+# https://www.unb.ca/cic/datasets/ids-2017.html
+
+# MAWI Working Group Traffic Capture (sample, ~50 MB)
+# http://mawi.wide.ad.jp/mawi/
+
+# USTC-TK2016 (small TLS-focused PCAPs, ~80 MB)
+# https://github.com/USTC-Hacker/USTC-TK2016
+
+# For a quick test: use the existing botnet-capture-20110810-neris.pcap already under data/raw
+# (no download needed)
