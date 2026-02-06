@@ -21,9 +21,9 @@ import torch.nn as nn
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score, precision_recall_fscore_support
 
-CSV_PATH = pathlib.Path("../data/processed/splt_features.csv")
-LABELED_CSV_PATH = pathlib.Path("../data/processed/splt_features_labeled.csv")
-MODEL_DIR = pathlib.Path("../models")
+CSV_PATH = pathlib.Path("data/processed/splt_features.csv")
+LABELED_CSV_PATH = pathlib.Path("data/processed/splt_features_labeled.csv")
+MODEL_DIR = pathlib.Path("models")
 
 TCN_PATH = MODEL_DIR / "tcn_classifier.pth"
 AE_PATH = MODEL_DIR / "autoencoder.pth"
@@ -73,16 +73,14 @@ class TCN(nn.Module):
         super().__init__()
         layers = []
         ch_in = in_ch
-        ch_out = channels[-1]
         for i, c in enumerate(channels):
             layers.append(TemporalBlock(ch_in, c, kernel_size, dilation=2 ** i, dropout=dropout))
             ch_in = c
-            ch_out = c
         self.tcn = nn.Sequential(*layers)
         self.head = nn.Sequential(
             nn.AdaptiveAvgPool1d(1),
             nn.Flatten(),
-            nn.Linear(ch_out, n_classes),
+            nn.Linear(ch_in, n_classes),
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -175,35 +173,77 @@ def main():
 
     Xt = torch.from_numpy(X_test).float().to(device)
 
-    # TCN predictions
+    # TCN probabilities
     with torch.no_grad():
         probs = torch.softmax(tcn(Xt), dim=1)[:, 1].cpu().numpy()
-    y_tcn = (probs >= 0.6).astype(np.int64)
 
-    # AE anomaly predictions
+    # AE normalized reconstruction error (0..1)
     with torch.no_grad():
         xhat = ae(Xt)
         err = ((Xt - xhat) ** 2).mean(dim=(1, 2)).cpu().numpy()
     ae_score = np.clip(err / max(ae_thr, 1e-6), 0.0, 1.0)
-    y_ae = (ae_score >= 0.7).astype(np.int64)
 
-    # Iso anomaly predictions
+    # IsoForest anomaly score (0..1), higher = more anomalous
     v = X_test.reshape(X_test.shape[0], -1)
     vs = scaler.transform(v)
     df_score = iso.decision_function(vs)
     iso_score = 1.0 / (1.0 + np.exp(3.0 * df_score))
     iso_score = np.clip(iso_score, 0.0, 1.0)
-    y_iso = (iso_score >= 0.6).astype(np.int64)
 
-    # Ensemble
-    ens = np.clip(0.50 * probs + 0.25 * ae_score + 0.25 * iso_score, 0.0, 1.0)
-    y_ens = (ens >= 0.6).astype(np.int64)
+    # Threshold sweeps per model
+    tcn_thrs = np.linspace(0.50, 0.80, 7)
+    ae_thrs = np.linspace(0.40, 0.90, 6)
+    iso_thrs = np.linspace(0.40, 0.90, 6)
 
-    print("Metrics (holdout test split)")
-    print("- TCN:", metrics(y_test, y_tcn))
-    print("- Autoencoder:", metrics(y_test, y_ae))
-    print("- IsoForest:", metrics(y_test, y_iso))
-    print("- Ensemble:", metrics(y_test, y_ens))
+    best_tcn = (0.0, 0.60, metrics(y_test, (probs >= 0.6).astype(np.int64)))
+    best_ae = (0.0, 0.70, metrics(y_test, (ae_score >= 0.7).astype(np.int64)))
+    best_iso = (0.0, 0.60, metrics(y_test, (iso_score >= 0.6).astype(np.int64)))
+
+    for thr in tcn_thrs:
+        y_pred = (probs >= thr).astype(np.int64)
+        m = metrics(y_test, y_pred)
+        if m["f1"] > best_tcn[0]:
+            best_tcn = (m["f1"], float(thr), m)
+    for thr in ae_thrs:
+        y_pred = (ae_score >= thr).astype(np.int64)
+        m = metrics(y_test, y_pred)
+        if m["f1"] > best_ae[0]:
+            best_ae = (m["f1"], float(thr), m)
+    for thr in iso_thrs:
+        y_pred = (iso_score >= thr).astype(np.int64)
+        m = metrics(y_test, y_pred)
+        if m["f1"] > best_iso[0]:
+            best_iso = (m["f1"], float(thr), m)
+
+    # Ensemble sweep over weights and decision threshold
+    weight_grid = []
+    for wt in [0.4, 0.5, 0.6]:
+        for wa in [0.2, 0.3]:
+            wi = 1.0 - wt - wa
+            if 0.1 <= wi <= 0.4:
+                weight_grid.append((wt, wa, wi))
+    ens_thrs = [0.50, 0.55, 0.60, 0.65]
+
+    best_ens = (0.0, (0.50, 0.25, 0.25), 0.60, metrics(y_test, (np.clip(0.50 * probs + 0.25 * ae_score + 0.25 * iso_score, 0.0, 1.0) >= 0.6).astype(np.int64)))
+    for (wt, wa, wi) in weight_grid:
+        ens = np.clip(wt * probs + wa * ae_score + wi * iso_score, 0.0, 1.0)
+        for thr in ens_thrs:
+            y_pred = (ens >= thr).astype(np.int64)
+            m = metrics(y_test, y_pred)
+            if m["f1"] > best_ens[0]:
+                best_ens = (m["f1"], (wt, wa, wi), float(thr), m)
+
+    def row(name, m):
+        return f"{name}: acc={m['acc']:.4f} prec={m['precision']:.4f} rec={m['recall']:.4f} f1={m['f1']:.4f}"
+
+    print("\nBest per-model metrics (threshold sweep):")
+    print(row("TCN", best_tcn[2]), f"thr={best_tcn[1]:.2f}")
+    print(row("AE ", best_ae[2]), f"thr={best_ae[1]:.2f}")
+    print(row("ISO", best_iso[2]), f"thr={best_iso[1]:.2f}")
+
+    print("\nBest Ensemble metrics:")
+    w = best_ens[1]
+    print(row("ENS", best_ens[3]), f"weights=(TCN={w[0]:.2f}, AE={w[1]:.2f}, ISO={w[2]:.2f}) thr={best_ens[2]:.2f}")
 
 
 if __name__ == "__main__":

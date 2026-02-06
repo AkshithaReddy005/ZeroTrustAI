@@ -14,9 +14,9 @@ import joblib
 from sklearn.preprocessing import StandardScaler
 from sklearn.ensemble import IsolationForest
 
-CSV_PATH = pathlib.Path("../data/processed/splt_features.csv")
-LABELED_CSV_PATH = pathlib.Path("../data/processed/splt_features_labeled.csv")
-MODEL_DIR = pathlib.Path("../models")
+CSV_PATH = pathlib.Path("data/processed/splt_features.csv")
+LABELED_CSV_PATH = pathlib.Path("data/processed/splt_features_labeled.csv")
+MODEL_DIR = pathlib.Path("models")
 MODEL_DIR.mkdir(parents=True, exist_ok=True)
 
 OUT_SCALER = MODEL_DIR / "splt_scaler.joblib"
@@ -56,7 +56,8 @@ def main():
     if X_benign.shape[0] < 50:
         X_benign = Xs
 
-    iso = IsolationForest(n_estimators=300, contamination=0.05, random_state=42)
+    # Slightly higher contamination typically improves recall on imbalanced threat data
+    iso = IsolationForest(n_estimators=300, contamination=0.12, random_state=42)
     iso.fit(X_benign)
 
     joblib.dump(scaler, OUT_SCALER)
