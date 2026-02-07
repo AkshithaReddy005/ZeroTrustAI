@@ -14,9 +14,9 @@ import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
 
-CSV_PATH = pathlib.Path("data/processed/splt_features.csv")
-LABELED_CSV_PATH = pathlib.Path("data/processed/splt_features_labeled.csv")
-MODEL_DIR = pathlib.Path("models")
+CSV_PATH = pathlib.Path("../data/processed/splt_features.csv")
+LABELED_CSV_PATH = pathlib.Path("../data/processed/splt_features_labeled.csv")
+MODEL_DIR = pathlib.Path("../models")
 MODEL_DIR.mkdir(parents=True, exist_ok=True)
 AE_PATH = MODEL_DIR / "autoencoder.pth"
 THR_PATH = MODEL_DIR / "ae_threshold.txt"

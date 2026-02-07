@@ -56,7 +56,8 @@ def main():
     if X_benign.shape[0] < 50:
         X_benign = Xs
 
-    iso = IsolationForest(n_estimators=300, contamination=0.05, random_state=42)
+    # Slightly higher contamination typically improves recall on imbalanced threat data
+    iso = IsolationForest(n_estimators=300, contamination=0.12, random_state=42)
     iso.fit(X_benign)
 
     joblib.dump(scaler, OUT_SCALER)

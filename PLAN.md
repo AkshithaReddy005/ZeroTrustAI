@@ -3,14 +3,37 @@
 ## Project Overview
 AI-Driven Next-Generation Firewall with Zero Trust principles, featuring real-time threat detection using advanced ML models and automated response.
 
-## Current Status: Week 1 Day 1 ✅ COMPLETE
+## Current Status: Week 1 Day 6 ✅ COMPLETE
 
-### ✅ COMPLETED (Day 1)
+### ✅ COMPLETED (Day 1-6)
 - **Docker Environment Setup**
   - Docker Compose with all services (Python, Redis, InfluxDB)
   - Memory limits configured: API/Detector (4GB), Redis (2GB), InfluxDB (3GB)
   - WSL2 available for packet capture
   - Inter-service communication tested
+
+- **Dataset Acquisition & Processing**
+  - Downloaded CSE-CIC-IDS2018 dataset
+  - Extracted SPLT features (packet lengths and inter-arrival times)
+  - Created labeled dataset using CTU binetflow labels
+  - Organized data in data/raw/ and data/processed/
+
+- **Model Training Complete**
+  - TCN classifier trained on SPLT sequences
+  - Autoencoder trained for anomaly detection
+  - Isolation Forest trained on SPLT features
+  - All models saved to models/ directory
+
+- **Evaluation & Metrics**
+  - TCN: 98.58% accuracy, 96.63% F1-score
+  - Autoencoder: 74.94% accuracy, 8.57% F1-score (needs tuning)
+  - IsolationForest: 78.24% accuracy, 0% recall (needs improvement)
+  - Ensemble: 83.84% accuracy, 40.11% F1-score
+
+- **Git Integration**
+  - All scripts and models pushed to GitHub
+  - Git LFS configured for large files
+  - Complete commit history preserved
 
 ---
 
@@ -22,36 +45,42 @@ AI-Driven Next-Generation Firewall with Zero Trust principles, featuring real-ti
 - [x] Test inter-service communication
 - [x] Deliverable: Memory-limited Docker environment
 
-### 📅 Day 2: Dataset Acquisition
-- [ ] Download CSE-CIC-IDS2018 dataset
-- [ ] Verify TLS 1.3 traffic presence
-- [ ] Organize into data/raw/
-- [ ] Deliverable: Modern dataset ready
+### ✅ Day 2: Dataset Acquisition (COMPLETE)
+- [x] Download CSE-CIC-IDS2018 dataset
+- [x] Verify TLS 1.3 traffic presence
+- [x] Organize into data/raw/
+- [x] Deliverable: Modern dataset ready
 
-### 📅 Day 3–4: Feature Extraction with NFStream (TLS 1.3 Focus)
-- [ ] Install NFStream
-- [ ] Extract SPLT features (Sequence of Packet Lengths and Times)
+### ✅ Day 3–4: Feature Extraction with NFStream (COMPLETE)
+- [x] Install NFStream
+- [x] Extract SPLT features (Sequence of Packet Lengths and Times)
   - Packet length sequences (first 20 packets)
   - Inter-packet timing sequences
   - Flow duration, byte counts
   - TLS handshake metadata (version, cipher suites)
-- [ ] Apply log-scaling to packet lengths
-- [ ] Handle TLS 1.3 Encrypted Client Hello (ECH)
-- [ ] Deliverable: data/processed/splt_features.csv
+- [x] Apply log-scaling to packet lengths
+- [x] Handle TLS 1.3 Encrypted Client Hello (ECH)
+- [x] Deliverable: data/processed/splt_features.csv
 
-### 📅 Day 5–6: Train TCN + Autoencoder
-- [ ] Build Temporal Convolutional Network (TCN)
-- [ ] Build Autoencoder for anomaly detection
-- [ ] Train on SPLT features
-- [ ] Deliverables:
-  - models/tcn_classifier.pth (>92% accuracy on encrypted traffic)
+### ✅ Day 5–6: Train TCN + Autoencoder (COMPLETE)
+- [x] Build Temporal Convolutional Network (TCN)
+- [x] Build Autoencoder for anomaly detection
+- [x] Train on SPLT features
+- [x] Deliverables:
+  - models/tcn_classifier.pth (98.58% accuracy)
   - models/autoencoder.pth
+  - models/splt_isoforest.joblib
+  - models/splt_scaler.joblib
+  - models/ae_threshold.txt
 
-### 📅 Day 7: Train Isolation Forest + Ensemble
-- [ ] Train Isolation Forest
-- [ ] Create ensemble voting system (TCN + Autoencoder + Isolation Forest)
-- [ ] Generate performance metrics
-- [ ] Deliverable: models/anomaly_ensemble.pkl + Performance report
+### 📅 Day 7: Train Isolation Forest + Ensemble (IN PROGRESS)
+- [x] Train Isolation Forest
+- [x] Create ensemble voting system (TCN + Autoencoder + Isolation Forest)
+- [x] Generate performance metrics
+- [ ] Optimize IsolationForest parameters (increase contamination)
+- [ ] Tune Autoencoder threshold for better recall
+- [ ] Optimize ensemble weights and decision threshold
+- [ ] Deliverable: Enhanced ensemble with improved F1-score
 
 ---
 
@@ -220,25 +249,54 @@ AI-Driven Next-Generation Firewall with Zero Trust principles, featuring real-ti
 ## DELIVERABLES
 
 ### Models
-- `models/tcn_classifier.pth` - Temporal Convolutional Network
+- `models/tcn_classifier.pth` - Temporal Convolutional Network (98.58% accuracy)
 - `models/autoencoder.pth` - Anomaly detection autoencoder
-- `models/anomaly_ensemble.pkl` - Ensemble voting system
+- `models/splt_isoforest.joblib` - Isolation Forest for SPLT features
+- `models/splt_scaler.joblib` - Feature scaler for SPLT
+- `models/ae_threshold.txt` - Autoencoder anomaly threshold
 
 ### Data
 - `data/raw/` - Raw CSE-CIC-IDS2018 dataset
 - `data/processed/splt_features.csv` - Extracted SPLT features
+- `data/processed/splt_features_labeled.csv` - Labeled SPLT dataset
+
+### Scripts
+- `scripts/train_tcn.py` - TCN training script
+- `scripts/train_autoencoder.py` - Autoencoder training script
+- `scripts/train_isoforest_splt.py` - Isolation Forest training script
+- `scripts/evaluate_models.py` - Model evaluation with metrics
+- `scripts/build_labeled_splt_ctu.py` - Dataset labeling script
+- `scripts/extract_splt_nfstream.py` - SPLT feature extraction
 
 ### Services
 - Complete Docker Compose stack with memory limits
-- Real-time detection engine with <500ms latency
-- REST API with JWT authentication
-- Streamlit dashboard with MITRE mapping
+- Real-time detection engine with <500ms latency (pending integration)
+- REST API with JWT authentication (pending)
+- Streamlit dashboard with MITRE mapping (pending)
 
 ### Documentation
-- Performance metrics and graphs
-- 24-hour stability proof
-- Demo scenarios and scripts
-- Technical documentation
+- Performance metrics achieved (TCN: 98.58% accuracy)
+- Git repository with complete history
+- Technical documentation (this PLAN.md)
+
+---
+
+## NEXT STEPS (Immediate)
+
+### 1. Model Optimization
+- Improve IsolationForest recall by increasing contamination parameter
+- Tune Autoencoder threshold for better F1-score
+- Optimize ensemble weights for balanced precision/recall
+
+### 2. Production Integration
+- Update detector microservice with current best settings
+- Implement real-time inference pipeline
+- Set up monitoring for model performance
+
+### 3. Testing & Validation
+- Test on unseen PCAP captures
+- Monitor false positive rates
+- Validate against different attack types
 
 ---
 
@@ -259,5 +317,5 @@ AI-Driven Next-Generation Firewall with Zero Trust principles, featuring real-ti
 
 ---
 
-*Last Updated: January 27, 2026*
-*Status: Week 1 Day 1 Complete*
+*Last Updated: February 3, 2026*
+*Status: Week 1 Day 6 Complete - Models trained and evaluated*

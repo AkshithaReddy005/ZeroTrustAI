@@ -1,0 +1,71 @@
+version: '3.8'
+
+services:
+  # Enhanced Detector with WebSocket support
+  detector-web:
+    build: ./services/detector
+    ports:
+      - "9000:9000"
+    volumes:
+      - ./models:/app/models:ro
+      - ./data:/app/data:ro
+      - ./apps/web:/app/web:ro
+    environment:
+      - PYTHONPATH=/app
+      - REDIS_URL=redis://redis:6379
+    depends_on:
+      - redis
+    command: python app/websocket_server.py
+    mem_limit: 4g
+    networks:
+      - zerotrust
+
+  # Nginx for serving static files
+  nginx:
+    image: nginx:alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./apps/web:/usr/share/nginx/html:ro
+      - ./infra/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - detector-web
+    networks:
+      - zerotrust
+
+  # Redis for real-time data
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    mem_limit: 1g
+    networks:
+      - zerotrust
+
+  # Grafana for advanced monitoring
+  grafana:
+    image: grafana/grafana:latest
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin123
+      - GF_INSTALL_PLUGINS=grafana-clock-panel,grafana-simple-json-datasource
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./infra/grafana/dashboards:/etc/grafana/provisioning/dashboards
+    depends_on:
+      - redis
+    mem_limit: 1g
+    networks:
+      - zerotrust
+
+volumes:
+  redis_data:
+  grafana_data:
+
+networks:
+  zerotrust:
+    driver: bridge
