@@ -1,5 +1,3 @@
-version: '3.9'
-
 services:
   api:
     build: ../services/api-gateway
@@ -26,15 +24,6 @@ services:
     depends_on:
       - api
 
-  collector:
-    build: ../services/collector
-    container_name: ztai_collector
-    environment:
-      - API_BASE_URL=http://api:8000
-      - EMIT_INTERVAL_MS=1000
-    depends_on:
-      - api
-
   pcap_replay:
     build: ../services/pcap-replay
     container_name: ztai_pcap_replay
@@ -55,10 +44,19 @@ services:
     environment:
       - PYTHONUNBUFFERED=1
       - MODEL_DIR=/models
+      - REDIS_URL=redis://redis:6379/0
+      - REDIS_TTL_SECONDS=1800
+      - INFLUX_URL=http://influxdb:8086
+      - INFLUX_TOKEN=${INFLUX_TOKEN:-}
+      - INFLUX_ORG=zerotrust
+      - INFLUX_BUCKET=threat_events
     volumes:
       - ../shared:/app/shared:ro
       - ../models:/models
     mem_limit: 4g
+    depends_on:
+      - redis
+      - influxdb
 
   redis:
     image: redis:7-alpine

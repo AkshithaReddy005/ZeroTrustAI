@@ -254,6 +254,60 @@ ENS:█████████████████████ 98.54%
 
 ---
 
+### **Phase 3: Database Integration & Memory**
+**Timeline**: Week 3 → Current
+**Status**: ✅ Complete
+
+#### **🗄️ What We Added**
+- **Redis Integration**: Real-time risk state with TTL (risk decay)
+- **InfluxDB Integration**: Historical threat logging for analytics
+- **Dual Database Architecture**: Real-time + historical storage
+- **Persistent Memory**: Model no longer "forgets" predictions
+
+#### **🔧 Technical Implementation**
+- **Detector Service**: Enhanced `/detect` endpoint with database writes
+- **Risk Decay**: Automatic TTL expiration (30 minutes default)
+- **Time-Series Logging**: Every detection stored in InfluxDB
+- **Best-Effort Design**: Detection works even if databases are down
+
+#### **📊 Database Schema**
+- **Redis**: `risk:<ip>` keys with score, severity, reasons, TTL
+- **InfluxDB**: `threat_events` measurement with tags/fields
+- **Configuration**: Environment variables for all settings
+- **Dependencies**: `redis==4.2.0`, `influxdb-client==1.36.0`
+
+#### **🎯 Benefits Achieved**
+- **Real-Time Dashboard**: Active risky IPs with automatic decay
+- **Historical Analytics**: "Threats over 24h" graphs ready
+- **MITRE TTP Tracking**: Framework in place for attack mapping
+- **Production Ready**: Persistent memory for enterprise deployment
+
+---
+
+### **Phase 4: Real-Time Interface & Documentation**
+**Timeline**: Week 3 → Current
+**Status**: ✅ Complete
+
+#### **🌐 Real-Time Dashboard**
+- **WebSocket Server**: Live threat broadcasting
+- **Professional UI**: Modern security operations center
+- **Demo Script**: `demo_realtime.py` for testing
+- **Docker Integration**: Complete containerized deployment
+
+#### **📚 Documentation**
+- **README_TEAM.md**: Complete team onboarding guide
+- **DOCKER_QUICK_START.md**: Simple 3-command setup
+- **DOCKER_TROUBLESHOOTING.md**: Common issues & solutions
+- **Technical Documentation**: Updated with database integration
+
+#### **🐳 Docker Fixes**
+- **Compose File**: Fixed `infra/docker-compose.yml`
+- **Version Issues**: Removed obsolete version field
+- **Service Dependencies**: Corrected missing services
+- **Environment Variables**: Added Redis/InfluxDB configuration
+
+---
+
 ## 📝 Decision Log
 
 ### **2024-02-06: Model Optimization Decision**
@@ -281,6 +335,9 @@ ENS:█████████████████████ 98.54%
 - ✅ **Real-time capability**: Sub-100ms detection
 - ✅ **Production interface**: Professional dashboard
 - ✅ **Complete pipeline**: End-to-end solution
+- ✅ **Persistent memory**: Redis + InfluxDB integration
+- ✅ **Risk decay**: Automatic threat expiration
+- ✅ **Historical analytics**: Time-series threat tracking
 - ✅ **Documentation**: Comprehensive guides
 
 ### **Business Impact**
@@ -288,8 +345,10 @@ ENS:█████████████████████ 98.54%
 - ✅ **Scalable architecture**: Handles enterprise traffic
 - ✅ **Operational efficiency**: Automated detection
 - ✅ **Rapid deployment**: Ready for production use
+- ✅ **Enterprise features**: Real-time + historical analytics
+- ✅ **Team ready**: Complete onboarding documentation
 
 ---
 
-*Last Updated: 2024-02-06*
+*Last Updated: 2024-02-07*
 *Next Review: After production deployment*

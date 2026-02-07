@@ -29,7 +29,8 @@ app.add_middleware(
 )
 
 # Mount static files
-app.mount("/static", StaticFiles(directory="static"), name="static")
+# Mount static files (not needed for HTML dashboard)
+# app.mount("/static", StaticFiles(directory="static"), name="static")
 
 @dataclass
 class ThreatEvent:
@@ -322,8 +323,12 @@ async def get_attack_stats():
 
 @app.get("/", response_class=HTMLResponse)
 async def get_web_interface():
-    """Serve the main web interface"""
-    return FileResponse("../../../apps/web/index.html")
+    """Serve main web interface"""
+    try:
+        with open("../../../apps/web/index.html", "r", encoding="utf-8") as f:
+            return f.read()
+    except FileNotFoundError:
+        return "<h1>Web interface not found. Run from project root.</h1>"
 
 # Simulation endpoint for testing
 @app.post("/simulate-threats")

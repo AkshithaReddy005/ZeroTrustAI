@@ -6,11 +6,12 @@
 3. [Data Pipeline](#data-pipeline)
 4. [Machine Learning Models](#machine-learning-models)
 5. [Feature Engineering](#feature-engineering)
-6. [API Documentation](#api-documentation)
-7. [Deployment](#deployment)
-8. [Performance Metrics](#performance-metrics)
-9. [Security Considerations](#security-considerations)
-10. [Troubleshooting](#troubleshooting)
+6. [Database Integration](#database-integration)
+7. [API Documentation](#api-documentation)
+8. [Deployment](#deployment)
+9. [Performance Metrics](#performance-metrics)
+10. [Security Considerations](#security-considerations)
+11. [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -23,6 +24,7 @@ ZeroTrust-AI is a real-time network threat detection system that operates on enc
 - **Real-Time**: Sub-500ms detection latency
 - **Behavioral Analysis**: Detects patterns rather than signatures
 - **Multi-Model Ensemble**: Reduces false positives through consensus
+- **Persistent Memory**: Redis (real-time) + InfluxDB (historical)
 - **Scalable**: Microservices architecture with containerization
 
 ---
@@ -40,6 +42,11 @@ ZeroTrust-AI is a real-time network threat detection system that operates on enc
 │  Response      │ ←  │   Decision   │ ←  │   ML Models │
 │  System        │    │   Engine     │    │   Ensemble  │
 └─────────────────┘    └──────────────┘    └─────────────┘
+                              ↓
+                    ┌─────────────────────┐
+                    │   Memory Layer      │
+                    │  Redis + InfluxDB   │
+                    └─────────────────────┘
 ```
 
 ### Microservices Components
@@ -273,6 +280,128 @@ def preprocess_splt(splt_data):
 - **Timing Patterns**: Regular intervals indicate C2 communication
 - **Size Patterns**: Consistent packet sizes suggest automated behavior
 - **Direction**: Asymmetric traffic may indicate data exfiltration
+
+---
+
+## Database Integration
+
+ZeroTrust-AI implements a dual-database architecture for optimal performance and analytics:
+
+### Redis: Real-Time State Management
+
+#### Purpose
+- **Risk Decay**: Automatic expiration of threat indicators
+- **Active Monitoring**: Current risky IPs and their scores
+- **Session Management**: WebSocket connection tracking
+- **Message Queuing**: Real-time threat broadcasting
+
+#### Data Schema
+```
+Key: risk:<src_ip> or risk:<flow_id>
+Type: Hash
+Fields:
+  - flow_id: Unique flow identifier
+  - score: Ensemble risk score (0.0-1.0)
+  - severity: LOW/MEDIUM/HIGH/CRITICAL
+  - reasons: Detection reasons (comma-separated)
+  - ts: Unix timestamp
+TTL: 1800 seconds (30 minutes, configurable)
+```
+
+#### Usage Examples
+```python
+# Store risky IP with TTL
+redis_client.hset(f"risk:{src_ip}", mapping={
+    "score": "0.87",
+    "severity": "HIGH",
+    "reasons": "mlp_malicious,anomalous_flow"
+})
+redis_client.expire(f"risk:{src_ip}", 1800)
+
+# Get all active risks
+keys = redis_client.keys("risk:*")
+for key in keys:
+    risk_data = redis_client.hgetall(key)
+    # Display in real-time dashboard
+```
+
+### InfluxDB: Historical Analytics
+
+#### Purpose
+- **Time-Series Logging**: Every detection event
+- **Trend Analysis**: Threat patterns over time
+- **Compliance**: Audit trails and reporting
+- **Performance Metrics**: Model accuracy tracking
+
+#### Data Schema
+```
+Measurement: threat_events
+Tags (indexed):
+  - label: benign/malicious
+  - severity: LOW/MEDIUM/HIGH/CRITICAL
+  - attack_type: botnet/data_exfiltration/unknown
+  - mitre_tactic: TA0001/TA0002/unknown
+  - mitre_technique: T1071/T1041/unknown
+
+Fields (values):
+  - score: float (ensemble confidence)
+  - anomaly_score: float (anomaly detection)
+  - confidence: float (overall confidence)
+  - src_ip: string (source IP)
+  - dst_ip: string (destination IP)
+
+Timestamp: RFC3339 UTC
+```
+
+#### Query Examples
+```flux
+// Threats over last 24 hours
+from(bucket: "threat_events")
+  |> range(start: -24h)
+  |> filter(fn: (r) => r._measurement == "threat_events" and r.label == "malicious")
+  |> aggregateWindow(every: 5m, fn: count, createEmpty: false)
+
+// Top attack types this week
+from(bucket: "threat_events")
+  |> range(start: -7d)
+  |> filter(fn: (r) => r.attack_type != "unknown")
+  |> group(columns: ["attack_type"])
+  |> count()
+  |> sort(desc: true, column: "_value")
+```
+
+### Configuration
+
+#### Environment Variables
+```bash
+# Redis Configuration
+REDIS_URL=redis://localhost:6379/0
+REDIS_TTL_SECONDS=1800
+
+# InfluxDB Configuration
+INFLUX_URL=http://localhost:8086
+INFLUX_TOKEN=your-token-here
+INFLUX_ORG=zerotrust
+INFLUX_BUCKET=threat_events
+```
+
+#### Dependencies
+```bash
+pip install redis influxdb-client
+```
+
+### Best Practices
+
+#### Redis
+- Use appropriate TTL values (30min-2hours for risk decay)
+- Monitor memory usage with `redis-cli info memory`
+- Use connection pooling for high-throughput scenarios
+
+#### InfluxDB
+- Use tags for frequently filtered fields
+- Use fields for numeric values
+- Implement retention policies for long-term storage
+- Batch writes for better performance
 
 ---
 

@@ -15,6 +15,19 @@ import torch.nn as nn
 from sklearn.ensemble import IsolationForest
 from sklearn.preprocessing import StandardScaler
 
+# Optional integrations for real-time state and historical logging
+try:
+    import redis  # type: ignore
+except Exception:  # pragma: no cover - optional dependency
+    redis = None  # type: ignore
+
+try:
+    from influxdb_client import InfluxDBClient, Point, WriteOptions  # type: ignore
+except Exception:  # pragma: no cover - optional dependency
+    InfluxDBClient = None  # type: ignore
+    Point = None  # type: ignore
+    WriteOptions = None  # type: ignore
+
 
 # Add shared module path (mounted by docker-compose)
 sys.path.append("/app/shared")
@@ -73,6 +86,43 @@ ISO_PATH = os.path.join(MODEL_DIR, "isoforest.joblib")
 PT_PATH = os.path.join(MODEL_DIR, "pytorch_mlp.pt")
 FEEDBACK_PATH = os.path.join(MODEL_DIR, "feedback.jsonl")
 META_PATH = os.path.join(MODEL_DIR, "meta.json")
+
+
+# --- Optional Redis + InfluxDB configuration ---
+REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+REDIS_TTL_SECONDS = int(os.getenv("REDIS_TTL_SECONDS", "1800"))  # 30 minutes default
+
+INFLUX_URL = os.getenv("INFLUX_URL", "http://localhost:8086")
+INFLUX_TOKEN = os.getenv("INFLUX_TOKEN", "")
+INFLUX_ORG = os.getenv("INFLUX_ORG", "zerotrust")
+INFLUX_BUCKET = os.getenv("INFLUX_BUCKET", "threat_events")
+
+
+def _init_redis():
+    if redis is None:
+        return None
+    try:
+        client = redis.from_url(REDIS_URL)
+        # lightweight ping to validate; ignore failure and fall back to None
+        client.ping()
+        return client
+    except Exception:
+        return None
+
+
+def _init_influx():
+    if InfluxDBClient is None or not INFLUX_TOKEN:
+        return None
+    try:
+        client = InfluxDBClient(url=INFLUX_URL, token=INFLUX_TOKEN, org=INFLUX_ORG)
+        write_api = client.write_api(write_options=WriteOptions(batch_size=1))
+        return write_api
+    except Exception:
+        return None
+
+
+REDIS_CLIENT = _init_redis()
+INFLUX_WRITE_API = _init_influx()
 
 
 def flow_to_vec(f: FlowFeatures) -> np.ndarray:
@@ -304,6 +354,64 @@ def detect(flow: FlowFeatures):
 
     label = "malicious" if score >= 0.6 else "benign"
     sev = severity_from_score(score)
+
+    # --- Optional Redis: real-time risk state with TTL (risk decay) ---
+    if REDIS_CLIENT is not None and label == "malicious":
+        try:
+            # Use source IP as key if available; otherwise fall back to flow_id
+            src_ip = getattr(flow, "src_ip", None)
+            key = f"risk:{src_ip}" if src_ip else f"risk:{flow.flow_id}"
+            doc = {
+                "flow_id": flow.flow_id,
+                "score": float(score),
+                "severity": sev,
+                "reasons": ",".join(reasons) or "low_risk",
+                "ts": time.time(),
+            }
+            REDIS_CLIENT.hset(key, mapping={k: str(v) for k, v in doc.items()})
+            REDIS_CLIENT.expire(key, REDIS_TTL_SECONDS)
+        except Exception:
+            # Best-effort only; detection must not fail if Redis is down
+            pass
+
+    # --- Optional InfluxDB: historical threat/time-series logging ---
+    if INFLUX_WRITE_API is not None:
+        try:
+            # Attack type and MITRE TTP could be inferred from reasons; placeholder for now
+            attack_type = "unknown"
+            mitre_tactic = "unknown"
+            mitre_technique = "unknown"
+
+            fields = {
+                "score": float(score),
+                "anomaly_score": float(a_score),
+                "confidence": float(score),
+            }
+            # Optionally include IPs if present on schema
+            for attr in ("src_ip", "dst_ip"):
+                if hasattr(flow, attr):
+                    fields[attr] = getattr(flow, attr)
+
+            p = (
+                Point("threat_events")
+                .tag("label", label)
+                .tag("severity", sev)
+                .tag("attack_type", attack_type)
+                .tag("mitre_tactic", mitre_tactic)
+                .tag("mitre_technique", mitre_technique)
+            )
+            for k, v in fields.items():
+                # InfluxDB can handle float/string; cast conservatively
+                if isinstance(v, (int, float)):
+                    p = p.field(k, float(v))
+                else:
+                    p = p.field(k, str(v))
+
+            INFLUX_WRITE_API.write(bucket=INFLUX_BUCKET, org=INFLUX_ORG, record=p)
+        except Exception:
+            # Best-effort logging; never break detection
+            pass
+
     return ThreatEvent(
         flow_id=flow.flow_id,
         label=label,
