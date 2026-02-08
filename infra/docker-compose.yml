@@ -1,6 +1,9 @@
 services:
   api:
-    build: ../services/api-gateway
+    build: 
+      context: ../services/api-gateway
+      cache_from:
+        - ztai/api:latest
     container_name: ztai_api
     ports:
       - "8000:8000"
@@ -15,7 +18,10 @@ services:
     mem_limit: 4g
 
   dashboard:
-    build: ../apps/dashboard
+    build: 
+      context: ../apps/dashboard
+      cache_from:
+        - ztai/dashboard:latest
     container_name: ztai_dashboard
     ports:
       - "8501:8501"
@@ -25,7 +31,10 @@ services:
       - api
 
   pcap_replay:
-    build: ../services/pcap-replay
+    build: 
+      context: ../services/pcap-replay
+      cache_from:
+        - ztai/pcap_replay:latest
     container_name: ztai_pcap_replay
     environment:
       - API_BASE_URL=http://api:8000
@@ -37,7 +46,10 @@ services:
       - api
 
   detector:
-    build: ../services/detector
+    build: 
+      context: ../services/detector
+      cache_from:
+        - ztai/detector:latest
     container_name: ztai_detector
     ports:
       - "9000:9000"
