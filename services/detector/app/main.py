@@ -344,6 +344,80 @@ def anomaly_score_from_iso(iso: IsolationForest, x_scaled: np.ndarray) -> float:
     return float(np.clip(score, 0.0, 1.0))
 
 
+def map_to_mitre_ttp(reasons: List[str], flow: FlowFeatures) -> tuple[str, str, str]:
+    """
+    Map detection reasons to MITRE ATT&CK TTPs
+    
+    Returns:
+        tuple: (attack_type, mitre_tactic, mitre_technique)
+    """
+    # Default to unknown
+    attack_type = "unknown"
+    mitre_tactic = "unknown"
+    mitre_technique = "unknown"
+    
+    # Convert reasons to lowercase for matching
+    reason_str = " ".join(reasons).lower()
+    
+    # Botnet detection patterns
+    if any(keyword in reason_str for keyword in ["botnet", "c2", "command", "tcn_malicious"]):
+        attack_type = "botnet"
+        mitre_tactic = "Command and Control"
+        mitre_technique = "T1071"  # Application Layer Protocol
+        
+    # Data exfiltration patterns
+    elif any(keyword in reason_str for keyword in ["exfiltration", "data_transfer", "large_upload"]):
+        attack_type = "data_exfiltration"
+        mitre_tactic = "Exfiltration"
+        mitre_technique = "T1041"  # Exfiltration Over C2 Channel
+        
+    # Anomalous traffic patterns
+    elif any(keyword in reason_str for keyword in ["anomalous", "ae_anomalous", "isoforest_anomalous"]):
+        attack_type = "anomalous_behavior"
+        mitre_tactic = "Defense Evasion"
+        mitre_technique = "T1027"  # Obfuscated Files or Information
+        
+    # DDoS patterns
+    elif any(keyword in reason_str for keyword in ["ddos", "flood", "high_volume"]):
+        attack_type = "ddos"
+        mitre_tactic = "Impact"
+        mitre_technique = "T1498"  # Network Denial of Service
+        
+    # Port scanning patterns
+    elif any(keyword in reason_str for keyword in ["scan", "reconnaissance", "port_scan"]):
+        attack_type = "reconnaissance"
+        mitre_tactic = "Reconnaissance"
+        mitre_technique = "T1046"  # Network Service Scanning
+        
+    # Web-based attacks
+    elif any(keyword in reason_str for keyword in ["web", "http", "sql_injection", "xss"]):
+        attack_type = "web_attack"
+        mitre_tactic = "Initial Access"
+        mitre_technique = "T1190"  # Exploit Public-Facing Application
+        
+    # Malware communication
+    elif any(keyword in reason_str for keyword in ["malware", "trojan", "backdoor"]):
+        attack_type = "malware"
+        mitre_tactic = "Execution"
+        mitre_technique = "T1059"  # Command and Scripting Interpreter
+        
+    # Check for specific port-based patterns
+    if hasattr(flow, 'dst_port'):
+        dst_port = flow.dst_port
+        if dst_port in [443, 8443] and "botnet" in reason_str:
+            # HTTPS-based C2
+            mitre_technique = "T1071.001"  # Application Layer Protocol: HTTPS
+        elif dst_port in [80, 8080] and "web" in reason_str:
+            # HTTP-based attacks
+            mitre_technique = "T1071.001"  # Application Layer Protocol: HTTP
+        elif dst_port in [22, 23, 3389] and "brute" in reason_str:
+            # Brute force attacks
+            mitre_tactic = "Credential Access"
+            mitre_technique = "T1110"  # Brute Force
+            
+    return attack_type, mitre_tactic, mitre_technique
+
+
 def mlp_prob(mlp: MLP, x_scaled: np.ndarray) -> float:
     with torch.no_grad():
         t = torch.from_numpy(x_scaled.reshape(1, -1)).float()
@@ -363,6 +437,14 @@ def severity_from_score(score: float) -> str:
 
 
 app = FastAPI(title="ZT-AI Detector", version="0.2.0")
+
+# Include SOAR router for manual override capabilities
+try:
+    from .soar import soar_router
+    app.include_router(soar_router)
+except ImportError:
+    # SOAR module not available, continue without it
+    pass
 
 
 @app.get("/health")
@@ -555,10 +637,8 @@ def detect(flow: FlowFeatures):
     # --- Optional InfluxDB: historical threat/time-series logging ---
     if INFLUX_WRITE_API is not None:
         try:
-            # Attack type and MITRE TTP could be inferred from reasons; placeholder for now
-            attack_type = "unknown"
-            mitre_tactic = "unknown"
-            mitre_technique = "unknown"
+            # Map detection reasons to MITRE ATT&CK TTPs
+            attack_type, mitre_tactic, mitre_technique = map_to_mitre_ttp(reasons, flow)
 
             fields = {
                 "score": float(score),
@@ -587,7 +667,7 @@ def detect(flow: FlowFeatures):
 
             INFLUX_WRITE_API.write(bucket=INFLUX_BUCKET, org=INFLUX_ORG, record=p)
         except Exception:
-            # Best-effort logging; never break detection
+            # Do not fail detection if InfluxDB is down
             pass
 
     return ThreatEvent(

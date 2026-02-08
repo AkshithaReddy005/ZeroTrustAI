@@ -10,27 +10,65 @@ import random
 from datetime import datetime
 
 def generate_realistic_threat():
-    """Generate realistic threat events for demonstration"""
-    attack_types = ['botnet', 'data_exfiltration', 'port_scanning', 'malware']
+    """Generate realistic threat events for demonstration with MITRE TTPs"""
+    # Define attack scenarios with MITRE TTPs
+    attack_scenarios = [
+        {
+            "attack_type": "botnet",
+            "reasons": ["tcn_malicious", "ae_anomalous"],
+            "dst_port": 443,
+            "mitre_tactic": "Command and Control",
+            "mitre_technique": "T1071"
+        },
+        {
+            "attack_type": "data_exfiltration", 
+            "reasons": ["anomalous_flow", "high_entropy"],
+            "dst_port": 80,
+            "mitre_tactic": "Exfiltration",
+            "mitre_technique": "T1041"
+        },
+        {
+            "attack_type": "reconnaissance",
+            "reasons": ["port_scan", "suspicious_timing"],
+            "dst_port": 22,
+            "mitre_tactic": "Reconnaissance", 
+            "mitre_technique": "T1046"
+        },
+        {
+            "attack_type": "web_attack",
+            "reasons": ["suspicious_timing", "unusual_pattern"],
+            "dst_port": 8080,
+            "mitre_tactic": "Initial Access",
+            "mitre_technique": "T1190"
+        },
+        {
+            "attack_type": "malware",
+            "reasons": ["c2_communication", "regular_beaconing"],
+            "dst_port": 443,
+            "mitre_tactic": "Execution",
+            "mitre_technique": "T1059"
+        }
+    ]
+    
     severities = ['high', 'medium', 'low']
     
     # Random IP addresses
     source_ip = f"192.168.1.{random.randint(100, 200)}"
     dest_ip = f"10.0.0.{random.randint(1, 50)}"
     
-    # Generate threat
+    # Select attack scenario
+    scenario = random.choice(attack_scenarios)
+    
+    # Generate threat with MITRE TTPs
     threat = {
-        "flow_id": f"{source_ip}:{random.randint(1000, 9999)}→{dest_ip}:{random.choice([80, 443, 22, 3389])}/TCP",
+        "flow_id": f"{source_ip}:{random.randint(1000, 9999)}→{dest_ip}:{scenario['dst_port']}/TCP",
         "label": "malicious" if random.random() > 0.3 else "benign",
         "confidence": round(random.uniform(0.6, 0.99), 2),
         "severity": random.choice(severities),
-        "reason": random.choice([
-            ["tcn_malicious", "ae_anomalous"],
-            ["anomalous_flow", "high_entropy"],
-            ["suspicious_timing", "unusual_pattern"],
-            ["c2_communication", "regular_beaconing"]
-        ]),
-        "attack_type": random.choice(attack_types),
+        "reason": scenario["reasons"],
+        "attack_type": scenario["attack_type"],
+        "mitre_tactic": scenario["mitre_tactic"],
+        "mitre_technique": scenario["mitre_technique"],
         "source_ip": source_ip,
         "destination_ip": dest_ip,
         "blocked": random.choice([True, False]),

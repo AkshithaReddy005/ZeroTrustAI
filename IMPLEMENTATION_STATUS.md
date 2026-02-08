@@ -201,7 +201,7 @@
 
 ## CURRENT STATUS SUMMARY
 
-### ✅ COMPLETED (Week 1: 85% complete)
+### COMPLETED (Week 1: 85% complete)
 - Docker environment with memory limits
 - Dataset acquisition and organization
 - SPLT feature extraction from PCAPs

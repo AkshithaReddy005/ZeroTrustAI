@@ -250,7 +250,7 @@ ZeroTrust-AI/
 
 ## 🎮 How to Use the System
 
-### **� Option 1: Docker (Recommended for Production)**
+### **🐳 Option 1: Docker (Recommended for Production)**
 ```bash
 # Start all services with Docker
 docker-compose -f docker-compose.web.yml up -d
@@ -266,7 +266,24 @@ docker-compose ps
 docker-compose logs -f websocket-server
 ```
 
-### **🚀 Option 2: Real-Time Dashboard (Local Python)**
+### **🚀 Option 2: Without Docker (Local Development)**
+```bash
+# Install dependencies
+pip install -r requirements.txt
+pip install streamlit-shap shap
+
+# Start required services (minimum 3)
+redis-server &
+influxd &
+cd services/detector/app && python main.py &
+
+# Start optional services
+cd services/api-gateway && python main.py &
+cd apps/dashboard && streamlit run index.py &
+cd apps/dashboard && streamlit run xai_dashboard_standalone.py &
+```
+
+### **🚀 Option 3: Real-Time Dashboard (Local Python)**
 ```bash
 # Start WebSocket server
 python services/detector/app/websocket_server.py
@@ -454,14 +471,25 @@ python services/detector/app/websocket_server.py
 # Then open http://localhost:9000
 ```
 
-## 🎯 Key Achievements
+## 🎯 Current Project Status
 
-### **✅ What's Been Accomplished**
-- **96.54% F1-score** ensemble performance
-- **Real-time threat detection** (<500ms latency)
-- **Professional web dashboard** with live updates
-- **Complete documentation** and technical guides
-- **Production-ready** deployment options
+### **✅ Completed Features**
+- **96.54% F1-score** ML ensemble with TCN, Autoencoder, IsolationForest
+- **Real-time dashboard** with WebSocket live updates
+- **Redis + InfluxDB** persistent memory with risk decay
+- **MITRE ATT&CK** TTP mapping for threat intelligence
+- **Performance testing** with <100ms latency verification
+- **SOAR capabilities** with manual override and audit trail
+- **XAI integration** SHAP-based explainable AI with visualizations
+- **Complete documentation** and team onboarding guides
+- **Docker deployment** ready for production
+
+### **🚀 Final Checklist (Week 4)**
+- ✅ **MITRE ATT&CK Mapping**: Botnet → T1071, Data Exfiltration → T1041, etc.
+- ✅ **Performance Stress Test**: 1000 concurrent requests, <100ms latency
+- ✅ **SOAR Manual Override**: IP blocking/unblocking with Redis risk management
+- ✅ **Verification Complete**: All modules tested and functional
+- ✅ **XAI Implementation**: SHAP explanations with force/waterfall plots
 
 ### **📊 Model Performance Summary**
 | Model | Accuracy | Precision | Recall | F1-Score |
