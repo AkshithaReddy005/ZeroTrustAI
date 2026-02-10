@@ -1,15 +1,15 @@
+version: '3.9'
+
 services:
   api:
-    build: 
-      context: ../services/api-gateway
-      cache_from:
-        - ztai/api:latest
+    build: ../services/api-gateway
     container_name: ztai_api
     ports:
       - "8000:8000"
     environment:
       - PYTHONUNBUFFERED=1
       - DETECTOR_URL=http://detector:9000
+      - WS_SERVER_URL=http://wsserver:9000
     volumes:
       - ../shared:/app/shared:ro
     depends_on:
@@ -18,23 +18,34 @@ services:
     mem_limit: 4g
 
   dashboard:
-    build: 
-      context: ../apps/dashboard
-      cache_from:
-        - ztai/dashboard:latest
+    build: ../apps/dashboard
     container_name: ztai_dashboard
     ports:
       - "8501:8501"
     environment:
       - API_BASE_URL=http://api:8000
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - INFLUX_URL=http://influxdb:8086
+      - INFLUX_TOKEN=${INFLUX_TOKEN}
+      - INFLUX_ORG=${INFLUX_ORG}
+      - INFLUX_BUCKET=${INFLUX_BUCKET}
+    depends_on:
+      - api
+      - redis
+      - influxdb
+
+  collector:
+    build: ../services/collector
+    container_name: ztai_collector
+    environment:
+      - API_BASE_URL=http://api:8000
+      - EMIT_INTERVAL_MS=1000
     depends_on:
       - api
 
   pcap_replay:
-    build: 
-      context: ../services/pcap-replay
-      cache_from:
-        - ztai/pcap_replay:latest
+    build: ../services/pcap-replay
     container_name: ztai_pcap_replay
     environment:
       - API_BASE_URL=http://api:8000
@@ -46,29 +57,29 @@ services:
       - api
 
   detector:
-    build: 
-      context: ../services/detector
-      cache_from:
-        - ztai/detector:latest
+    build: ../services/detector
     container_name: ztai_detector
     ports:
       - "9000:9000"
     environment:
       - PYTHONUNBUFFERED=1
       - MODEL_DIR=/models
-      - REDIS_URL=redis://redis:6379/0
-      - REDIS_TTL_SECONDS=1800
-      - INFLUX_URL=http://influxdb:8086
-      - INFLUX_TOKEN=${INFLUX_TOKEN:-}
-      - INFLUX_ORG=zerotrust
-      - INFLUX_BUCKET=threat_events
     volumes:
       - ../shared:/app/shared:ro
       - ../models:/models
     mem_limit: 4g
+
+  wsserver:
+    build: ../services/detector
+    container_name: ztai_wsserver
+    ports:
+      - "9002:9000"
+    environment:
+      - PYTHONUNBUFFERED=1
+    command: python app/websocket_server.py
     depends_on:
-      - redis
-      - influxdb
+      - detector
+    mem_limit: 1g
 
   redis:
     image: redis:7-alpine

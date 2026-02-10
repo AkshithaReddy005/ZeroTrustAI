@@ -7,6 +7,8 @@ import json
 import time
 import uuid
 
+import uvicorn
+
 import numpy as np
 import joblib
 import torch
@@ -14,19 +16,6 @@ import torch.nn as nn
 
 from sklearn.ensemble import IsolationForest
 from sklearn.preprocessing import StandardScaler
-
-# Optional integrations for real-time state and historical logging
-try:
-    import redis  # type: ignore
-except Exception:  # pragma: no cover - optional dependency
-    redis = None  # type: ignore
-
-try:
-    from influxdb_client import InfluxDBClient, Point, WriteOptions  # type: ignore
-except Exception:  # pragma: no cover - optional dependency
-    InfluxDBClient = None  # type: ignore
-    Point = None  # type: ignore
-    WriteOptions = None  # type: ignore
 
 
 # Add shared module path (mounted by docker-compose)
@@ -53,6 +42,7 @@ except Exception:
         anomaly_score: float
         severity: Literal["LOW", "MEDIUM", "HIGH", "CRITICAL"]
         reason: List[str]
+        mitre_technique_id: Optional[str] = None
 
 
 class LabeledFlow(BaseModel):
@@ -81,54 +71,15 @@ class FeedbackRequest(BaseModel):
 MODEL_DIR = os.getenv("MODEL_DIR", "/models")
 os.makedirs(MODEL_DIR, exist_ok=True)
 
+MALICIOUS_SCORE_THRESHOLD = float(os.getenv("MALICIOUS_SCORE_THRESHOLD", "0.6"))
+MALICIOUS_ANOMALY_THRESHOLD = float(os.getenv("MALICIOUS_ANOMALY_THRESHOLD", "0.85"))
+MALICIOUS_MLP_THRESHOLD = float(os.getenv("MALICIOUS_MLP_THRESHOLD", "0.85"))
+
 SCALER_PATH = os.path.join(MODEL_DIR, "scaler.joblib")
 ISO_PATH = os.path.join(MODEL_DIR, "isoforest.joblib")
 PT_PATH = os.path.join(MODEL_DIR, "pytorch_mlp.pt")
 FEEDBACK_PATH = os.path.join(MODEL_DIR, "feedback.jsonl")
 META_PATH = os.path.join(MODEL_DIR, "meta.json")
-
-TCN_PATH = os.path.join(MODEL_DIR, "tcn_classifier.pth")
-AE_PATH = os.path.join(MODEL_DIR, "autoencoder.pth")
-AE_THR_PATH = os.path.join(MODEL_DIR, "ae_threshold.txt")
-SPLT_SCALER_PATH = os.path.join(MODEL_DIR, "splt_scaler.joblib")
-SPLT_ISO_PATH = os.path.join(MODEL_DIR, "splt_isoforest.joblib")
-
-
-# --- Optional Redis + InfluxDB configuration ---
-REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
-REDIS_TTL_SECONDS = int(os.getenv("REDIS_TTL_SECONDS", "1800"))  # 30 minutes default
-
-INFLUX_URL = os.getenv("INFLUX_URL", "http://localhost:8086")
-INFLUX_TOKEN = os.getenv("INFLUX_TOKEN", "")
-INFLUX_ORG = os.getenv("INFLUX_ORG", "zerotrust")
-INFLUX_BUCKET = os.getenv("INFLUX_BUCKET", "threat_events")
-
-
-def _init_redis():
-    if redis is None:
-        return None
-    try:
-        client = redis.from_url(REDIS_URL)
-        # lightweight ping to validate; ignore failure and fall back to None
-        client.ping()
-        return client
-    except Exception:
-        return None
-
-
-def _init_influx():
-    if InfluxDBClient is None or not INFLUX_TOKEN:
-        return None
-    try:
-        client = InfluxDBClient(url=INFLUX_URL, token=INFLUX_TOKEN, org=INFLUX_ORG)
-        write_api = client.write_api(write_options=WriteOptions(batch_size=1))
-        return write_api
-    except Exception:
-        return None
-
-
-REDIS_CLIENT = _init_redis()
-INFLUX_WRITE_API = _init_influx()
 
 
 def flow_to_vec(f: FlowFeatures) -> np.ndarray:
@@ -164,81 +115,6 @@ class MLP(nn.Module):
         return self.net(x)
 
 
-class Chomp1d(nn.Module):
-    def __init__(self, chomp_size: int):
-        super().__init__()
-        self.chomp_size = int(chomp_size)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        if self.chomp_size <= 0:
-            return x
-        return x[:, :, :-self.chomp_size].contiguous()
-
-
-class TemporalBlock(nn.Module):
-    def __init__(self, in_ch: int, out_ch: int, kernel_size: int, dilation: int, dropout: float):
-        super().__init__()
-        pad = (kernel_size - 1) * dilation
-        self.net = nn.Sequential(
-            nn.Conv1d(in_ch, out_ch, kernel_size, padding=pad, dilation=dilation),
-            Chomp1d(pad),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Conv1d(out_ch, out_ch, kernel_size, padding=pad, dilation=dilation),
-            Chomp1d(pad),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-        )
-        self.downsample = nn.Conv1d(in_ch, out_ch, 1) if in_ch != out_ch else nn.Identity()
-        self.relu = nn.ReLU()
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        out = self.net(x)
-        res = self.downsample(x)
-        return self.relu(out + res)
-
-
-class TCN(nn.Module):
-    def __init__(self, in_ch: int = 2, n_classes: int = 2, channels=(32, 64, 64), kernel_size: int = 3, dropout: float = 0.2):
-        super().__init__()
-        layers = []
-        ch_in = in_ch
-        ch_out = channels[-1]
-        for i, c in enumerate(channels):
-            layers.append(TemporalBlock(ch_in, c, kernel_size, dilation=2 ** i, dropout=dropout))
-            ch_in = c
-            ch_out = c
-        self.tcn = nn.Sequential(*layers)
-        self.head = nn.Sequential(
-            nn.AdaptiveAvgPool1d(1),
-            nn.Flatten(),
-            nn.Linear(ch_out, n_classes),
-        )
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        z = self.tcn(x)
-        return self.head(z)
-
-
-class AE(nn.Module):
-    def __init__(self, in_ch: int = 2, latent: int = 32):
-        super().__init__()
-        self.enc = nn.Sequential(
-            nn.Conv1d(in_ch, 32, 3, padding=1), nn.ReLU(),
-            nn.Conv1d(32, 64, 3, padding=1), nn.ReLU(),
-            nn.Conv1d(64, latent, 3, padding=1), nn.ReLU(),
-        )
-        self.dec = nn.Sequential(
-            nn.Conv1d(latent, 64, 3, padding=1), nn.ReLU(),
-            nn.Conv1d(64, 32, 3, padding=1), nn.ReLU(),
-            nn.Conv1d(32, in_ch, 3, padding=1),
-        )
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        z = self.enc(x)
-        return self.dec(z)
-
-
 def load_models() -> Tuple[Optional[StandardScaler], Optional[IsolationForest], Optional[MLP]]:
     scaler = None
     iso = None
@@ -253,58 +129,6 @@ def load_models() -> Tuple[Optional[StandardScaler], Optional[IsolationForest], 
         mlp.load_state_dict(state["state_dict"])
         mlp.eval()
     return scaler, iso, mlp
-
-
-def load_sequence_models() -> Tuple[Optional[TCN], Optional[AE], Optional[float], Optional[StandardScaler], Optional[IsolationForest]]:
-    tcn = None
-    ae = None
-    ae_thr = None
-    splt_scaler = None
-    splt_iso = None
-
-    if os.path.exists(TCN_PATH):
-        tcn = TCN()
-        state = torch.load(TCN_PATH, map_location="cpu")
-        tcn.load_state_dict(state)
-        tcn.eval()
-    if os.path.exists(AE_PATH):
-        ae = AE()
-        state = torch.load(AE_PATH, map_location="cpu")
-        ae.load_state_dict(state)
-        ae.eval()
-    if os.path.exists(AE_THR_PATH):
-        try:
-            ae_thr = float(open(AE_THR_PATH, "r", encoding="utf-8").read().strip())
-        except Exception:
-            ae_thr = None
-    if os.path.exists(SPLT_SCALER_PATH):
-        splt_scaler = joblib.load(SPLT_SCALER_PATH)
-    if os.path.exists(SPLT_ISO_PATH):
-        splt_iso = joblib.load(SPLT_ISO_PATH)
-    return tcn, ae, ae_thr, splt_scaler, splt_iso
-
-
-def flow_to_splt_tensor(flow: FlowFeatures, seq_len: int = 20) -> Optional[torch.Tensor]:
-    if getattr(flow, "splt_len", None) is None or getattr(flow, "splt_iat", None) is None:
-        return None
-    try:
-        l = list(flow.splt_len or [])[:seq_len]
-        t = list(flow.splt_iat or [])[:seq_len]
-        if len(l) == 0 and len(t) == 0:
-            return None
-        while len(l) < seq_len:
-            l.append(0.0)
-        while len(t) < seq_len:
-            t.append(0.0)
-        x = torch.tensor([l, t], dtype=torch.float32).unsqueeze(0)  # [1,2,T]
-        return x
-    except Exception:
-        return None
-
-
-def splt_vec_from_tensor(x: torch.Tensor) -> np.ndarray:
-    # x: [1,2,20]
-    return x.squeeze(0).reshape(-1).numpy().astype(np.float32)
 
 
 def save_mlp(mlp: MLP, in_dim: int):
@@ -344,80 +168,6 @@ def anomaly_score_from_iso(iso: IsolationForest, x_scaled: np.ndarray) -> float:
     return float(np.clip(score, 0.0, 1.0))
 
 
-def map_to_mitre_ttp(reasons: List[str], flow: FlowFeatures) -> tuple[str, str, str]:
-    """
-    Map detection reasons to MITRE ATT&CK TTPs
-    
-    Returns:
-        tuple: (attack_type, mitre_tactic, mitre_technique)
-    """
-    # Default to unknown
-    attack_type = "unknown"
-    mitre_tactic = "unknown"
-    mitre_technique = "unknown"
-    
-    # Convert reasons to lowercase for matching
-    reason_str = " ".join(reasons).lower()
-    
-    # Botnet detection patterns
-    if any(keyword in reason_str for keyword in ["botnet", "c2", "command", "tcn_malicious"]):
-        attack_type = "botnet"
-        mitre_tactic = "Command and Control"
-        mitre_technique = "T1071"  # Application Layer Protocol
-        
-    # Data exfiltration patterns
-    elif any(keyword in reason_str for keyword in ["exfiltration", "data_transfer", "large_upload"]):
-        attack_type = "data_exfiltration"
-        mitre_tactic = "Exfiltration"
-        mitre_technique = "T1041"  # Exfiltration Over C2 Channel
-        
-    # Anomalous traffic patterns
-    elif any(keyword in reason_str for keyword in ["anomalous", "ae_anomalous", "isoforest_anomalous"]):
-        attack_type = "anomalous_behavior"
-        mitre_tactic = "Defense Evasion"
-        mitre_technique = "T1027"  # Obfuscated Files or Information
-        
-    # DDoS patterns
-    elif any(keyword in reason_str for keyword in ["ddos", "flood", "high_volume"]):
-        attack_type = "ddos"
-        mitre_tactic = "Impact"
-        mitre_technique = "T1498"  # Network Denial of Service
-        
-    # Port scanning patterns
-    elif any(keyword in reason_str for keyword in ["scan", "reconnaissance", "port_scan"]):
-        attack_type = "reconnaissance"
-        mitre_tactic = "Reconnaissance"
-        mitre_technique = "T1046"  # Network Service Scanning
-        
-    # Web-based attacks
-    elif any(keyword in reason_str for keyword in ["web", "http", "sql_injection", "xss"]):
-        attack_type = "web_attack"
-        mitre_tactic = "Initial Access"
-        mitre_technique = "T1190"  # Exploit Public-Facing Application
-        
-    # Malware communication
-    elif any(keyword in reason_str for keyword in ["malware", "trojan", "backdoor"]):
-        attack_type = "malware"
-        mitre_tactic = "Execution"
-        mitre_technique = "T1059"  # Command and Scripting Interpreter
-        
-    # Check for specific port-based patterns
-    if hasattr(flow, 'dst_port'):
-        dst_port = flow.dst_port
-        if dst_port in [443, 8443] and "botnet" in reason_str:
-            # HTTPS-based C2
-            mitre_technique = "T1071.001"  # Application Layer Protocol: HTTPS
-        elif dst_port in [80, 8080] and "web" in reason_str:
-            # HTTP-based attacks
-            mitre_technique = "T1071.001"  # Application Layer Protocol: HTTP
-        elif dst_port in [22, 23, 3389] and "brute" in reason_str:
-            # Brute force attacks
-            mitre_tactic = "Credential Access"
-            mitre_technique = "T1110"  # Brute Force
-            
-    return attack_type, mitre_tactic, mitre_technique
-
-
 def mlp_prob(mlp: MLP, x_scaled: np.ndarray) -> float:
     with torch.no_grad():
         t = torch.from_numpy(x_scaled.reshape(1, -1)).float()
@@ -435,32 +185,26 @@ def severity_from_score(score: float) -> str:
         return "MEDIUM"
     return "LOW"
 
+# Simple heuristic mapping from reasons/features to MITRE technique IDs (demo)
+MITRE_HEURISTICS = {
+    "mlp_malicious": "T1059",           # Command and Scripting Interpreter
+    "anomalous_flow": "T1071.001",      # Web Protocol
+    "high_packets_per_second": "T1498",  # Network Denial of Service
+    "syn_flood": "T1498.001",           # SYN Flood
+}
+
 
 app = FastAPI(title="ZT-AI Detector", version="0.2.0")
-
-# Include SOAR router for manual override capabilities
-try:
-    from .soar import soar_router
-    app.include_router(soar_router)
-except ImportError:
-    # SOAR module not available, continue without it
-    pass
 
 
 @app.get("/health")
 def health():
     scaler, iso, mlp = load_models()
-    tcn, ae, ae_thr, splt_scaler, splt_iso = load_sequence_models()
     return {
         "status": "ok",
         "scaler": bool(scaler),
         "isolation_forest": bool(iso),
         "pytorch": bool(mlp),
-        "tcn": bool(tcn),
-        "autoencoder": bool(ae),
-        "ae_threshold": ae_thr,
-        "splt_scaler": bool(splt_scaler),
-        "splt_isoforest": bool(splt_iso),
         "model_dir": MODEL_DIR,
     }
 
@@ -544,53 +288,22 @@ def train(req: TrainRequest):
 @app.post("/detect", response_model=ThreatEvent)
 def detect(flow: FlowFeatures):
     scaler, iso, mlp = load_models()
-    tcn, ae, ae_thr, splt_scaler, splt_iso = load_sequence_models()
     x = flow_to_vec(flow)
 
     reasons: List[str] = []
-    # Preferred path: sequence models when SPLT present AND models exist
-    x_seq = flow_to_splt_tensor(flow)
-    if x_seq is not None and tcn is not None and ae is not None and ae_thr is not None and splt_scaler is not None and splt_iso is not None:
-        with torch.no_grad():
-            logits = tcn(x_seq)
-            probs = torch.softmax(logits, dim=1).squeeze(0)
-            p_mal = float(probs[1].item())
-            xhat = ae(x_seq)
-            ae_err = float(((x_seq - xhat) ** 2).mean().item())
-
-        # Normalize AE error: ~0..1
-        ae_score = float(np.clip(ae_err / max(ae_thr, 1e-6), 0.0, 1.0))
-
-        # Isolation forest on SPLT
-        v = splt_vec_from_tensor(x_seq)
-        vs = splt_scaler.transform(v.reshape(1, -1)).reshape(-1)
-        iso_score = anomaly_score_from_iso(splt_iso, vs)
-
-        # Ensemble fusion
-        score = float(np.clip(0.50 * p_mal + 0.25 * ae_score + 0.25 * iso_score, 0.0, 1.0))
-        if p_mal >= 0.6:
-            reasons.append("tcn_malicious")
-        if ae_score >= 0.7:
-            reasons.append("ae_anomalous")
-        if iso_score >= 0.6:
-            reasons.append("isoforest_anomalous")
-
-        label = "malicious" if score >= 0.6 else "benign"
-        sev = severity_from_score(score)
-        return ThreatEvent(
-            flow_id=flow.flow_id,
-            label=label,
-            confidence=float(score),
-            anomaly_score=float(max(ae_score, iso_score)),
-            severity=sev,
-            reason=reasons or ["low_risk"],
-        )
-
-    # Fallback: legacy scalar models
+    mitre_id: Optional[str] = None
+    # If models missing, require /train first (but still return something usable)
     if scaler is None or iso is None or mlp is None:
         score = 0.5
         reasons.append("model_not_trained")
-        label = "malicious" if score >= 0.6 else "benign"
+        # Heuristic technique based on simple features
+        if flow.syn_count > 8 and flow.pps > 200:
+            mitre_id = "T1498.001"
+        elif flow.pps > 250:
+            mitre_id = "T1498"
+        else:
+            mitre_id = "T1071.001"
+        label = "malicious" if score >= MALICIOUS_SCORE_THRESHOLD else "benign"
         return ThreatEvent(
             flow_id=flow.flow_id,
             label=label,
@@ -598,6 +311,7 @@ def detect(flow: FlowFeatures):
             anomaly_score=float(score),
             severity=severity_from_score(score),
             reason=reasons,
+            mitre_technique_id=mitre_id,
         )
 
     xs = scaler.transform(x.reshape(1, -1)).reshape(-1)
@@ -607,74 +321,43 @@ def detect(flow: FlowFeatures):
     # Blend anomaly and classifier scores
     score = float(np.clip(0.55 * p_mal + 0.45 * a_score, 0.0, 1.0))
 
+    # Policy risk score (used for severity/confidence + optional malicious marking)
+    risk = float(np.clip(max(score, float(a_score), float(p_mal)), 0.0, 1.0))
+
     if p_mal > 0.6:
         reasons.append("mlp_malicious")
     if a_score > 0.6:
         reasons.append("anomalous_flow")
+    if flow.pps > 400:
+        reasons.append("high_packets_per_second")
+    if flow.syn_count > 12 and flow.pps > 300:
+        reasons.append("syn_flood")
 
-    label = "malicious" if score >= 0.6 else "benign"
-    sev = severity_from_score(score)
+    # Choose MITRE technique based on reasons
+    for r in reasons:
+        if r in MITRE_HEURISTICS:
+            mitre_id = MITRE_HEURISTICS[r]
+            break
+    if mitre_id is None:
+        mitre_id = "T1071.001"  # default to Web Protocol for unknowns
 
-    # --- Optional Redis: real-time risk state with TTL (risk decay) ---
-    if REDIS_CLIENT is not None and label == "malicious":
-        try:
-            # Use source IP as key if available; otherwise fall back to flow_id
-            src_ip = getattr(flow, "src_ip", None)
-            key = f"risk:{src_ip}" if src_ip else f"risk:{flow.flow_id}"
-            doc = {
-                "flow_id": flow.flow_id,
-                "score": float(score),
-                "severity": sev,
-                "reasons": ",".join(reasons) or "low_risk",
-                "ts": time.time(),
-            }
-            REDIS_CLIENT.hset(key, mapping={k: str(v) for k, v in doc.items()})
-            REDIS_CLIENT.expire(key, REDIS_TTL_SECONDS)
-        except Exception:
-            # Best-effort only; detection must not fail if Redis is down
-            pass
-
-    # --- Optional InfluxDB: historical threat/time-series logging ---
-    if INFLUX_WRITE_API is not None:
-        try:
-            # Map detection reasons to MITRE ATT&CK TTPs
-            attack_type, mitre_tactic, mitre_technique = map_to_mitre_ttp(reasons, flow)
-
-            fields = {
-                "score": float(score),
-                "anomaly_score": float(a_score),
-                "confidence": float(score),
-            }
-            # Optionally include IPs if present on schema
-            for attr in ("src_ip", "dst_ip"):
-                if hasattr(flow, attr):
-                    fields[attr] = getattr(flow, attr)
-
-            p = (
-                Point("threat_events")
-                .tag("label", label)
-                .tag("severity", sev)
-                .tag("attack_type", attack_type)
-                .tag("mitre_tactic", mitre_tactic)
-                .tag("mitre_technique", mitre_technique)
-            )
-            for k, v in fields.items():
-                # InfluxDB can handle float/string; cast conservatively
-                if isinstance(v, (int, float)):
-                    p = p.field(k, float(v))
-                else:
-                    p = p.field(k, str(v))
-
-            INFLUX_WRITE_API.write(bucket=INFLUX_BUCKET, org=INFLUX_ORG, record=p)
-        except Exception:
-            # Do not fail detection if InfluxDB is down
-            pass
-
+    is_malicious = (
+        risk >= MALICIOUS_SCORE_THRESHOLD
+        or a_score >= MALICIOUS_ANOMALY_THRESHOLD
+        or p_mal >= MALICIOUS_MLP_THRESHOLD
+    )
+    label = "malicious" if is_malicious else "benign"
+    sev = severity_from_score(risk)
     return ThreatEvent(
         flow_id=flow.flow_id,
         label=label,
-        confidence=float(score),
+        confidence=float(risk),
         anomaly_score=float(a_score),
         severity=sev,
         reason=reasons or ["low_risk"],
+        mitre_technique_id=mitre_id,
     )
+
+
+if __name__ == "__main__":
+    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", "9001")), log_level="info")

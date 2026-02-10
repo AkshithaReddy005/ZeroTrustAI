@@ -13,15 +13,25 @@ from datetime import datetime, timedelta
 import sys
 import os
 
-# Add paths
-sys.path.append("../detector/app")
-sys.path.append("../../shared")
+# Resolve project root based on this file location and add correct module paths
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.abspath(os.path.join(BASE_DIR, "..", ".."))
+DETECTOR_APP_PATH = os.path.join(PROJECT_ROOT, "services", "detector", "app")
+SHARED_PATH = os.path.join(PROJECT_ROOT, "shared")
+# Ensure project root is on sys.path so 'shared.schemas' imports work inside xai_explainer
+if PROJECT_ROOT not in sys.path:
+    sys.path.append(PROJECT_ROOT)
+for p in (DETECTOR_APP_PATH, SHARED_PATH):
+    if p not in sys.path:
+        sys.path.append(p)
 
 try:
     from xai_explainer import explain_detection, get_feature_importance_summary
     from schemas import FlowFeatures
-except ImportError:
+except ImportError as e:
     st.error("❌ XAI module not available. Please ensure all dependencies are installed.")
+    st.caption(f"Details: {e}")
+    st.caption(f"sys.path (first entries): {sys.path[:6]}")
     st.stop()
 
 # Configuration
