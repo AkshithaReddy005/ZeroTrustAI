@@ -6,6 +6,8 @@ import struct
 import dpkt
 import requests
 import random
+import csv
+import json
 from typing import Tuple, Dict
 
 from math import log1p
@@ -13,6 +15,8 @@ from math import log1p
 API_BASE = os.getenv("API_BASE_URL", "http://localhost:8000")
 FILE_GLOB = os.getenv("FILE_GLOB", "/data/raw/*.pcap")
 THROTTLE_MS = int(os.getenv("THROTTLE_MS", "25"))
+CSV_PATH = os.getenv("CSV_PATH", "c:\\Users\\shrey\\Desktop\\techs\\ZeroTrustAI\\data\\processed\\splt_features_labeled.csv")
+USE_CSV = os.getenv("USE_CSV", "true").lower() == "true"
 
 
 def inet_to_str(inet: bytes) -> str:
@@ -45,23 +49,95 @@ def flow_key(ip, l4) -> Tuple[str, str, int, int, str]:
 def post_flow_event(flow_id: str, agg: Dict):
     payload = {
         "flow_id": flow_id,
-        "total_packets": agg.get("count", 0),
-        "total_bytes": agg.get("bytes", 0),
-        "avg_packet_size": (agg.get("bytes", 0) / max(agg.get("count", 1), 1)),
-        "std_packet_size": round(random.uniform(10, 200), 2),  # simple placeholder
-        "duration": max(agg.get("last_ts", 0) - agg.get("first_ts", 0), 0.0001),
-        "pps": (agg.get("count", 0) / max(agg.get("last_ts", 0) - agg.get("first_ts", 0), 0.001)),
-        "avg_entropy": agg.get("entropy_sum", 0.0) / max(agg.get("count", 1), 1),
-        "syn_count": agg.get("syn", 0),
-        "fin_count": agg.get("fin", 0),
-        # SPLT sequences (best-effort): first 20 signed log-scaled packet lengths and IATs
-        "splt_len": agg.get("splt_len", None),
-        "splt_iat": agg.get("splt_iat", None),
+        "total_packets": agg.get("total_packets", 0),
+        "total_bytes": agg.get("total_bytes", 0),
+        "avg_packet_size": agg.get("avg_packet_size", 0),
+        "std_packet_size": agg.get("std_packet_size", 0),
+        "duration": agg.get("duration", 0.0001),
+        "pps": agg.get("pps", 0),
+        "avg_entropy": agg.get("avg_entropy", 0),
+        "syn_count": agg.get("syn_count", 0),
+        "fin_count": agg.get("fin_count", 0),
+        "splt_len": agg.get("splt_len", []),
+        "splt_iat": agg.get("splt_iat", []),
+        "source_ip": agg.get("src_ip", ""),
+        "destination_ip": agg.get("dst_ip", ""),
     }
     try:
         requests.post(f"{API_BASE}/events/flow", json=payload, timeout=3)
     except Exception:
         pass
+
+
+def post_threat_event(flow_id: str, agg: Dict, row_label: str):
+    # Determine label and severity based on CSV label or random injection
+    is_malicious = (str(row_label).strip() == "1")
+    if not is_malicious and random.random() < 0.1:  # 10% random malicious injection
+        is_malicious = True
+
+    severity = random.choice(["low", "medium", "high", "critical"]) if is_malicious else "low"
+    confidence = round(random.uniform(0.6, 0.99), 2) if is_malicious else round(random.uniform(0.1, 0.4), 2)
+    label = "malicious" if is_malicious else "benign"
+
+    attack_types = ["DDoS", "Port Scan", "Brute Force", "Data Exfiltration", "Command & Control", "Web Attack", "Malware C2", "Reconnaissance"]
+    attack_type = random.choice(attack_types) if is_malicious else "Normal Traffic"
+
+    reasons = []
+    if is_malicious:
+        reasons = ["High packet rate", "Unusual destination port", "Large payload entropy", "Suspicious timing pattern"]
+        random.shuffle(reasons)
+        reasons = reasons[:2]
+    else:
+        reasons = ["Normal protocol behavior", "Standard port usage", "Low entropy payload"]
+
+    payload = {
+        "flow_id": flow_id,
+        "label": label,
+        "confidence": confidence,
+        "severity": severity,
+        "reason": reasons,
+        "attack_type": attack_type,
+        "source_ip": agg.get("src_ip", ""),
+        "destination_ip": agg.get("dst_ip", ""),
+        "blocked": is_malicious and severity in ("high", "critical"),
+        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime()),
+    }
+    try:
+        requests.post(f"{API_BASE}/events/threat", json=payload, timeout=3)
+    except Exception:
+        pass
+
+
+def process_csv():
+    if not os.path.exists(CSV_PATH):
+        print(f"CSV not found: {CSV_PATH}")
+        return
+    print(f"Replaying CSV: {CSV_PATH}")
+    with open(CSV_PATH, mode="r", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        for i, row in enumerate(reader):
+            flow_id = row.get("flow_id", f"csv-{i}")
+            agg = {
+                "src_ip": row.get("src_ip", ""),
+                "dst_ip": row.get("dst_ip", ""),
+                "total_packets": int(row.get("total_packets", 0)),
+                "total_bytes": int(row.get("total_bytes", 0)),
+                "avg_packet_size": float(row.get("avg_packet_size", 0)) if row.get("avg_packet_size") else (int(row.get("total_bytes", 0)) / max(int(row.get("total_packets", 1)), 1)),
+                "std_packet_size": round(random.uniform(10, 200), 2),
+                "duration": float(row.get("duration", 0.0001)),
+                "pps": float(row.get("pps", 0)),
+                "avg_entropy": float(row.get("avg_entropy", 0)),
+                "syn_count": int(row.get("syn_count", 0)),
+                "fin_count": int(row.get("fin_count", 0)),
+                "splt_len": [float(row.get(f"splt_len_{j}", 0)) for j in range(1, 21)],
+                "splt_iat": [float(row.get(f"splt_iat_{j}", 0)) for j in range(1, 21)],
+            }
+            post_flow_event(flow_id, agg)
+            post_threat_event(flow_id, agg, row.get("label", "0"))
+            time.sleep(THROTTLE_MS / 1000.0)
+    print("CSV replay complete. Sleeping...")
+    while True:
+        time.sleep(60)
 
 
 def process_pcap(path: str):
@@ -132,6 +208,9 @@ def process_pcap(path: str):
 
 
 def main():
+    if USE_CSV:
+        process_csv()
+        return
     files = sorted(glob.glob(FILE_GLOB))
     if not files:
         print(f"No PCAPs found for glob: {FILE_GLOB}. Waiting...")

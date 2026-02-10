@@ -11,6 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from typing import List, Dict, Any
 import json
 import asyncio
+import os
 import time
 from datetime import datetime, timedelta
 import random
@@ -50,6 +51,7 @@ class ConnectionManager:
         self.active_connections: List[WebSocket] = []
         self.threat_history: List[ThreatEvent] = []
         self.blocked_flows: set = set()
+        self.total_flows: int = 0
 
     async def connect(self, websocket: WebSocket):
         await websocket.accept()
@@ -77,6 +79,12 @@ class ConnectionManager:
 
 manager = ConnectionManager()
 
+
+@app.post("/flow")
+async def ingest_flow(flow: Dict[str, Any]):
+    manager.total_flows += 1
+    return {"status": "ok", "total_flows": manager.total_flows}
+
 # Attack type classification
 ATTACK_PATTERNS = {
     'botnet': ['regular_beaconing', 'c2_communication'],
@@ -88,6 +96,8 @@ ATTACK_PATTERNS = {
 
 def classify_attack_type(threat: ThreatEvent) -> str:
     """Classify the type of attack based on threat characteristics"""
+    if (threat.label or "").lower() != "malicious":
+        return None
     reasons = ' '.join(threat.reason).lower()
     
     for attack_type, patterns in ATTACK_PATTERNS.items():
@@ -130,6 +140,7 @@ def generate_realistic_threat() -> ThreatEvent:
             ["suspicious_timing", "unusual_pattern"],
             ["c2_communication", "regular_beaconing"]
         ]),
+        timestamp=datetime.now().isoformat(),
         attack_type=attack_type,
         source_ip=source_ip,
         destination_ip=dest_ip,
@@ -178,25 +189,36 @@ async def websocket_endpoint(websocket: WebSocket):
 @app.post("/detect")
 async def detect_threat(threat_data: Dict[str, Any]):
     """Receive threat detection from main detector service"""
+    sev_raw = threat_data.get("severity", "medium")
+    sev_norm = (sev_raw or "medium").strip().lower()
+    if sev_norm not in ("low", "medium", "high", "critical"):
+        sev_norm = "medium"
+
     threat = ThreatEvent(
         flow_id=threat_data.get("flow_id", "unknown"),
         label=threat_data.get("label", "unknown"),
         confidence=threat_data.get("confidence", 0.0),
-        severity=threat_data.get("severity", "medium"),
+        severity=sev_norm,
         reason=threat_data.get("reason", []),
-        timestamp=datetime.now().isoformat()
+        timestamp=threat_data.get("timestamp") or datetime.now().isoformat(),
+        attack_type=threat_data.get("attack_type"),
+        source_ip=threat_data.get("source_ip"),
+        destination_ip=threat_data.get("destination_ip"),
+        blocked=bool(threat_data.get("blocked", False)),
     )
     
     # Classify attack type
-    threat.attack_type = classify_attack_type(threat)
+    if not threat.attack_type:
+        threat.attack_type = classify_attack_type(threat)
     
     # Auto-block high severity threats
-    if threat.severity == 'high' and threat.confidence > 0.8:
+    if (not threat.blocked) and threat.severity in ('high', 'critical') and threat.confidence > 0.8:
         threat.blocked = True
         manager.blocked_flows.add(threat.flow_id)
     
     # Add to history
     manager.threat_history.append(threat)
+    manager.total_flows += 1
     
     # Keep only last 1000 threats
     if len(manager.threat_history) > 1000:
@@ -244,7 +266,7 @@ async def get_threats(limit: int = 50):
 @app.get("/metrics")
 async def get_metrics():
     """Get system metrics"""
-    total_flows = len(manager.threat_history) * 10  # Estimate
+    total_flows = manager.total_flows
     malicious_count = len([t for t in manager.threat_history if t.label == 'malicious'])
     blocked_count = len([t for t in manager.threat_history if t.blocked])
     
@@ -253,6 +275,16 @@ async def get_metrics():
     for threat in manager.threat_history:
         if threat.attack_type:
             attack_counts[threat.attack_type] = attack_counts.get(threat.attack_type, 0) + 1
+
+    def _is_within_last_minute(ts: str) -> bool:
+        if not ts:
+            return False
+        try:
+            dt = datetime.fromisoformat(ts)
+        except Exception:
+            return False
+        now = datetime.now(dt.tzinfo) if dt.tzinfo is not None else datetime.now()
+        return dt > now - timedelta(minutes=1)
     
     return {
         "total_flows": total_flows,
@@ -263,7 +295,7 @@ async def get_metrics():
         "attack_types": attack_counts,
         "recent_threats_per_minute": len([
             t for t in manager.threat_history 
-            if datetime.fromisoformat(t.timestamp) > datetime.now() - timedelta(minutes=1)
+            if t.label == 'malicious' and _is_within_last_minute(t.timestamp)
         ])
     }
 
@@ -337,6 +369,7 @@ async def simulate_threats(count: int = 10):
     for _ in range(count):
         threat = generate_realistic_threat()
         manager.threat_history.append(threat)
+        manager.total_flows += 1
         
         # Broadcast to all clients
         await manager.broadcast(json.dumps({
@@ -358,6 +391,40 @@ async def simulate_threats(count: int = 10):
         await asyncio.sleep(0.5)  # Small delay between threats
     
     return {"status": "success", "simulated": count}
+
+
+@app.on_event("startup")
+async def start_demo_traffic():
+    if os.getenv("ZTA_DEMO_TRAFFIC", "0") != "1":
+        return
+    async def _loop():
+        while True:
+            threat = generate_realistic_threat()
+            manager.threat_history.append(threat)
+            manager.total_flows += 1
+
+            if len(manager.threat_history) > 1000:
+                manager.threat_history = manager.threat_history[-1000:]
+
+            await manager.broadcast(json.dumps({
+                "type": "new_threat",
+                "data": {
+                    "flow_id": threat.flow_id,
+                    "label": threat.label,
+                    "confidence": threat.confidence,
+                    "severity": threat.severity,
+                    "reason": threat.reason,
+                    "timestamp": threat.timestamp,
+                    "attack_type": threat.attack_type,
+                    "source_ip": threat.source_ip,
+                    "destination_ip": threat.destination_ip,
+                    "blocked": threat.blocked
+                }
+            }))
+
+            await asyncio.sleep(2)
+
+    asyncio.create_task(_loop())
 
 if __name__ == "__main__":
     print("🛡️ ZeroTrust-AI Real-time WebSocket Server Starting...")
