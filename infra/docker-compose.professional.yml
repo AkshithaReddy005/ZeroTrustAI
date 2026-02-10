@@ -1,0 +1,239 @@
+version: '3.8'
+
+services:
+  # Professional Detector with Adaptive Risk Scoring
+  detector:
+    build:
+      context: ../services/detector
+      dockerfile: Dockerfile
+    container_name: zerotrust-detector
+    ports:
+      - "8000:8000"
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_DB=0
+      - INFLUX_URL=http://influxdb:8086
+      - INFLUX_TOKEN=${INFLUX_TOKEN:-professional-token-123}
+      - INFLUX_ORG=zerotrust
+      - INFLUX_BUCKET=threat_events
+      - SOAR_API_URL=http://soar:8001
+    volumes:
+      - ../models:/app/models:ro
+      - ../shared:/app/shared:ro
+    depends_on:
+      - redis
+      - influxdb
+    restart: unless-stopped
+    networks:
+      - zerotrust-network
+
+  # Professional SOAR Engine
+  soar:
+    build:
+      context: ../services/soar
+      dockerfile: Dockerfile
+    container_name: zerotrust-soar
+    ports:
+      - "8001:8001"
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_DB=1
+      - FIREWALL_API_URL=${FIREWALL_API_URL:-http://mock-firewall:9090/api/block}
+      - SIEM_API_URL=${SIEM_API_URL:-http://mock-siem:5600/api/alert}
+      - TICKET_SYSTEM_URL=${TICKET_SYSTEM_URL:-http://mock-ticket:8080/api/ticket}
+      - NOTIFICATION_WEBHOOK=${NOTIFICATION_WEBHOOK:-}
+      - AUTO_BLOCK_ENABLED=true
+      - BLOCK_DURATION_HOURS=24
+      - ESCALATION_THRESHOLD=95
+    depends_on:
+      - redis
+    restart: unless-stopped
+    networks:
+      - zerotrust-network
+
+  # Professional Dashboard
+  dashboard:
+    build:
+      context: ../apps/dashboard
+      dockerfile: Dockerfile
+    container_name: zerotrust-dashboard
+    ports:
+      - "8501:8501"
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - INFLUX_URL=http://influxdb:8086
+      - INFLUX_TOKEN=${INFLUX_TOKEN:-professional-token-123}
+      - INFLUX_ORG=zerotrust
+      - INFLUX_BUCKET=threat_events
+    depends_on:
+      - redis
+      - influxdb
+    restart: unless-stopped
+    networks:
+      - zerotrust-network
+
+  # API Gateway
+  api-gateway:
+    build:
+      context: ../services/api-gateway
+      dockerfile: Dockerfile
+    container_name: zerotrust-api-gateway
+    ports:
+      - "8080:8080"
+    environment:
+      - DETECTOR_URL=http://detector:8000
+      - SOAR_URL=http://soar:8001
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_DB=2
+    depends_on:
+      - detector
+      - soar
+      - redis
+    restart: unless-stopped
+    networks:
+      - zerotrust-network
+
+  # Data Collector
+  collector:
+    build:
+      context: ../services/collector
+      dockerfile: Dockerfile
+    container_name: zerotrust-collector
+    environment:
+      - API_GATEWAY_URL=http://api-gateway:8080
+      - FLOW_RATE=${FLOW_RATE:-10}
+      - THREAT_RATE=${THREAT_RATE:-0.1}
+    depends_on:
+      - api-gateway
+    restart: unless-stopped
+    networks:
+      - zerotrust-network
+
+  # Redis - Professional Shield
+  redis:
+    image: redis:7-alpine
+    container_name: zerotrust-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+      - ./redis.conf:/usr/local/etc/redis/redis.conf:ro
+    command: redis-server /usr/local/etc/redis/redis.conf
+    restart: unless-stopped
+    networks:
+      - zerotrust-network
+
+  # InfluxDB - Professional Brain
+  influxdb:
+    image: influxdb:2.7-alpine
+    container_name: zerotrust-influxdb
+    ports:
+      - "8086:8086"
+    environment:
+      - DOCKER_INFLUXDB_INIT_MODE=setup
+      - DOCKER_INFLUXDB_INIT_USERNAME=admin
+      - DOCKER_INFLUXDB_INIT_PASSWORD=${INFLUX_PASSWORD:-professional-password-123}
+      - DOCKER_INFLUXDB_INIT_ORG=zerotrust
+      - DOCKER_INFLUXDB_INIT_BUCKET=threat_events
+      - DOCKER_INFLUXDB_INIT_ADMIN_TOKEN=${INFLUX_TOKEN:-professional-token-123}
+    volumes:
+      - influxdb_data:/var/lib/influxdb2
+      - influxdb_config:/etc/influxdb2
+    restart: unless-stopped
+    networks:
+      - zerotrust-network
+
+  # Mock Firewall (for testing)
+  mock-firewall:
+    image: mockserver/mockserver:latest
+    container_name: zerotrust-mock-firewall
+    ports:
+      - "9090:1080"
+    environment:
+      - MOCKSERVER_PROPERTY_FILE=/config/mockserver.properties
+    volumes:
+      - ./mock-configs/firewall.json:/config/mockserver.properties:ro
+    restart: unless-stopped
+    networks:
+      - zerotrust-network
+
+  # Mock SIEM (for testing)
+  mock-siem:
+    image: mockserver/mockserver:latest
+    container_name: zerotrust-mock-siem
+    ports:
+      - "5600:1080"
+    environment:
+      - MOCKSERVER_PROPERTY_FILE=/config/mockserver.properties
+    volumes:
+      - ./mock-configs/siem.json:/config/mockserver.properties:ro
+    restart: unless-stopped
+    networks:
+      - zerotrust-network
+
+  # Mock Ticket System (for testing)
+  mock-ticket:
+    image: mockserver/mockserver:latest
+    container_name: zerotrust-mock-ticket
+    ports:
+      - "8080:1080"
+    environment:
+      - MOCKSERVER_PROPERTY_FILE=/config/mockserver.properties
+    volumes:
+      - ./mock-configs/ticket.json:/config/mockserver.properties:ro
+    restart: unless-stopped
+    networks:
+      - zerotrust-network
+
+  # Grafana for Advanced Visualization
+  grafana:
+    image: grafana/grafana:latest
+    container_name: zerotrust-grafana
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:-admin123}
+      - GF_INSTALL_PLUGINS=grafana-clock-panel,grafana-simple-json-datasource
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+    depends_on:
+      - influxdb
+    restart: unless-stopped
+    networks:
+      - zerotrust-network
+
+  # Redis Commander (Redis Management)
+  redis-commander:
+    image: rediscommander/redis-commander:latest
+    container_name: zerotrust-redis-commander
+    ports:
+      - "8081:8081"
+    environment:
+      - REDIS_HOSTS=local:redis:6379
+    depends_on:
+      - redis
+    restart: unless-stopped
+    networks:
+      - zerotrust-network
+
+volumes:
+  redis_data:
+    driver: local
+  influxdb_data:
+    driver: local
+  influxdb_config:
+    driver: local
+  grafana_data:
+    driver: local
+
+networks:
+  zerotrust-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16

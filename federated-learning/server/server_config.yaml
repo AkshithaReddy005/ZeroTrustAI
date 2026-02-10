@@ -1,0 +1,20 @@
+federated:
+  aggregation_strategy: fedavg
+  learning_rate: 0.001
+  local_epochs: 3
+  max_clients: 3
+  min_clients: 2
+  rounds: 3
+model:
+  hidden_size: 64
+  input_size: 12
+  num_classes: 2
+  sequence_length: 50
+security:
+  api_key: null
+  require_auth: false
+  update_validation: true
+server:
+  debug: false
+  host: localhost
+  port: 5000
