@@ -17,6 +17,8 @@ FILE_GLOB = os.getenv("FILE_GLOB", "/data/raw/*.pcap")
 THROTTLE_MS = int(os.getenv("THROTTLE_MS", "25"))
 CSV_PATH = os.getenv("CSV_PATH", "c:\\Users\\shrey\\Desktop\\techs\\ZeroTrustAI\\data\\processed\\splt_features_labeled.csv")
 USE_CSV = os.getenv("USE_CSV", "true").lower() == "true"
+DEMO_MODE = os.getenv("DEMO_MODE", "true").lower() == "true"
+DEMO_RATE = float(os.getenv("DEMO_RATE", "0.07"))
 
 
 def inet_to_str(inet: bytes) -> str:
@@ -70,10 +72,13 @@ def post_flow_event(flow_id: str, agg: Dict):
 
 
 def post_threat_event(flow_id: str, agg: Dict, row_label: str):
-    # Determine label and severity based on CSV label or random injection
+    # Determine label and severity based on CSV label or demo injection
     is_malicious = (str(row_label).strip() == "1")
-    if not is_malicious and random.random() < 0.1:  # 10% random malicious injection
+    if DEMO_MODE and not is_malicious and random.random() < DEMO_RATE:
         is_malicious = True
+        demo_suffix = " (demo_pattern)"
+    else:
+        demo_suffix = ""
 
     severity = random.choice(["low", "medium", "high", "critical"]) if is_malicious else "low"
     confidence = round(random.uniform(0.6, 0.99), 2) if is_malicious else round(random.uniform(0.1, 0.4), 2)
@@ -87,6 +92,8 @@ def post_threat_event(flow_id: str, agg: Dict, row_label: str):
         reasons = ["High packet rate", "Unusual destination port", "Large payload entropy", "Suspicious timing pattern"]
         random.shuffle(reasons)
         reasons = reasons[:2]
+        if demo_suffix:
+            reasons = [r + demo_suffix for r in reasons]
     else:
         reasons = ["Normal protocol behavior", "Standard port usage", "Low entropy payload"]
 
@@ -99,7 +106,7 @@ def post_threat_event(flow_id: str, agg: Dict, row_label: str):
         "attack_type": attack_type,
         "source_ip": agg.get("src_ip", ""),
         "destination_ip": agg.get("dst_ip", ""),
-        "blocked": is_malicious and severity in ("high", "critical"),
+        "blocked": is_malicious and severity in ("high", "critical") and confidence >= 0.8,
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime()),
     }
     try:
