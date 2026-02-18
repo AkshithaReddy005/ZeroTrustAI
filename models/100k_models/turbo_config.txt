@@ -1,0 +1,7 @@
+dataset_size=100000
+training_time=64.7
+benign_accuracy=0.3040
+attack_detection=0.8301
+overall_accuracy=0.5671
+batch_size=2048
+epochs=6

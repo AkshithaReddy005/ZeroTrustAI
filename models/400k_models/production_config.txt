@@ -1,0 +1,6 @@
+tcn_threshold=0.4
+ae_threshold=0.95
+benign_accuracy=0.143875
+attack_detection=0.983225
+f1_score=0.6925704826808953
+status=CLOSE

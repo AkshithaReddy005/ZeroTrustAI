@@ -1,0 +1,4 @@
+optimal_threshold=1.10949492
+benign_mean=0.17983954
+benign_std=0.98033625
+attack_detection_rate=0.1924
