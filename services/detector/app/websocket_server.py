@@ -243,6 +243,48 @@ async def detect_threat(threat_data: Dict[str, Any]):
     
     return {"status": "success", "threat_id": threat.flow_id, "blocked": threat.blocked}
 
+@app.post("/threats")
+async def receive_threat_event(threat_data: Dict[str, Any]):
+    """Receive threat event from demo script with real CSV data"""
+    # Convert demo data to ThreatEvent format
+    threat = ThreatEvent(
+        flow_id=threat_data.get("flow_id", f"flow-{manager.total_flows}"),
+        label=threat_data.get("attack_type", "unknown"),
+        confidence=threat_data.get("confidence", 0.8),
+        severity=threat_data.get("severity", "medium"),
+        reason=[f"ML Detection: {threat_data.get('attack_type', 'unknown')}"],
+        timestamp=threat_data.get("timestamp", datetime.utcnow().isoformat()),
+        attack_type=threat_data.get("attack_type", "unknown"),
+        source_ip=threat_data.get("source_ip", "unknown"),
+        destination_ip=threat_data.get("destination_ip", "unknown"),
+        blocked=threat_data.get("blocked", False)
+    )
+    
+    manager.threat_history.append(threat)
+    manager.total_flows += 1
+    
+    print(f"📨 Received threat: {threat.attack_type} | Total flows: {manager.total_flows} | Threats: {len([t for t in manager.threat_history if t.attack_type != 'benign'])}")
+    print(f"🔌 WebSocket clients: {len(manager.active_connections)}")
+    
+    # Broadcast to all WebSocket clients
+    await manager.broadcast(json.dumps({
+        "type": "new_threat",
+        "data": {
+            "flow_id": threat.flow_id,
+            "label": threat.label,
+            "confidence": threat.confidence,
+            "severity": threat.severity,
+            "reason": threat.reason,
+            "timestamp": threat.timestamp,
+            "attack_type": threat.attack_type,
+            "source_ip": threat.source_ip,
+            "destination_ip": threat.destination_ip,
+            "blocked": threat.blocked
+        }
+    }))
+    
+    return {"status": "success", "threat_id": threat.flow_id, "blocked": threat.blocked}
+
 @app.get("/threats")
 async def get_threats(limit: int = 50):
     """Get recent threats"""
@@ -357,7 +399,7 @@ async def get_attack_stats():
 async def get_web_interface():
     """Serve main web interface"""
     try:
-        with open("../../../apps/web/index.html", "r", encoding="utf-8") as f:
+        with open("c:/Users/shrey/Desktop/techsavishakara/techs/ZeroTrustAI/apps/web/index.html", "r", encoding="utf-8") as f:
             return f.read()
     except FileNotFoundError:
         return "<h1>Web interface not found. Run from project root.</h1>"

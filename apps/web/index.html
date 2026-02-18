@@ -770,29 +770,64 @@
           .catch(() => { });
       }, []);
 
-      // WebSocket stream
+      // WebSocket stream with reconnection
       useEffect(() => {
-        const ws = new WebSocket(WS_URL);
-        ws.onopen = () => setConnected(true);
-        ws.onclose = () => setConnected(false);
-        ws.onerror = () => setConnected(false);
-        ws.onmessage = (ev) => {
-          try {
-            const msg = JSON.parse(ev.data);
-            if (msg.type === 'new_threat') {
-              const incomingRaw = Array.isArray(msg.data) ? msg.data : [msg.data];
-              const incoming = incomingRaw.map(normalizeEvent);
-              setEvents(prev => {
-                const merged = [...prev, ...incoming];
-                const cutoff = Date.now() - ROLLING_WINDOW_MINUTES * 60_000;
-                return merged
-                  .filter(e => new Date(e.timestamp || Date.now()).getTime() >= cutoff)
-                  .slice(-5000);
-              });
+        let ws = null;
+        let reconnectInterval = null;
+        
+        const connect = () => {
+          console.log('🔌 Connecting to WebSocket...');
+          ws = new WebSocket(WS_URL);
+          
+          ws.onopen = () => {
+            console.log('✅ WebSocket connected');
+            setConnected(true);
+            if (reconnectInterval) {
+              clearInterval(reconnectInterval);
+              reconnectInterval = null;
             }
-          } catch (e) { /* ignore */ }
+          };
+          
+          ws.onclose = () => {
+            console.log('❌ WebSocket disconnected');
+            setConnected(false);
+            if (!reconnectInterval) {
+              reconnectInterval = setInterval(connect, 3000); // Reconnect every 3 seconds
+            }
+          };
+          
+          ws.onerror = (error) => {
+            console.log('🚨 WebSocket error:', error);
+            setConnected(false);
+          };
+          
+          ws.onmessage = (ev) => {
+            try {
+              const msg = JSON.parse(ev.data);
+              console.log('📨 WebSocket message:', msg);
+              if (msg.type === 'new_threat') {
+                const incomingRaw = Array.isArray(msg.data) ? msg.data : [msg.data];
+                const incoming = incomingRaw.map(normalizeEvent);
+                setEvents(prev => {
+                  const merged = [...prev, ...incoming];
+                  const cutoff = Date.now() - ROLLING_WINDOW_MINUTES * 60_000;
+                  return merged
+                    .filter(e => new Date(e.timestamp || Date.now()).getTime() >= cutoff)
+                    .slice(-5000);
+                });
+              }
+            } catch (e) { 
+              console.error('❌ Error parsing WebSocket message:', e);
+            }
+          };
         };
-        return () => ws.close();
+        
+        connect();
+        
+        return () => {
+          if (reconnectInterval) clearInterval(reconnectInterval);
+          if (ws) ws.close();
+        };
       }, []);
 
       // Optional demo-mode synthetic traffic
