@@ -1,0 +1,306 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>🤖 SOAR Implementation - ZeroTrust-AI</title>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" />
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <style>
+    @keyframes pulse-green {
+      0%, 100% { background-color: rgba(34, 197, 94, .1); }
+      50% { background-color: rgba(34, 197, 94, .2); }
+    }
+    .soar-active { animation: pulse-green 2s infinite; }
+    .cyber-grid {
+      background-image: linear-gradient(rgba(168, 85, 247, .08) 1px, transparent 1px), 
+                        linear-gradient(90deg, rgba(168, 85, 247, .08) 1px, transparent 1px);
+      background-size: 50px 50px;
+    }
+  </style>
+</head>
+<body class="bg-gray-900 text-white cyber-grid">
+  <div id="root"></div>
+  <script type="text/babel">
+    const { useEffect, useState, useRef } = React;
+    const API_BASE = 'http://localhost:9000';
+    const SOAR_API = 'http://localhost:9002';
+
+    const Header = () => (
+      <header className="bg-gray-800 border-b border-purple-500 px-6 py-4">
+        <div className="container mx-auto flex justify-between items-center">
+          <div className="flex items-center space-x-4">
+            <i className="fas fa-robot text-purple-500 text-2xl"></i>
+            <h1 className="text-2xl font-bold">SOAR Implementation</h1>
+            <a href="http://localhost:9000" className="text-sm text-blue-400 hover:text-blue-300">
+              <i className="fas fa-arrow-left mr-1"></i> Back to SOC
+            </a>
+          </div>
+          <div className="flex items-center space-x-4">
+            <span className="flex items-center">
+              <span className="w-3 h-3 bg-green-500 rounded-full mr-2 animate-pulse"></span>
+              <span className="text-sm">SOAR Engine Active</span>
+            </span>
+            <span className="text-sm text-gray-400">{new Date().toLocaleString()}</span>
+          </div>
+        </div>
+      </header>
+    );
+
+    const SandboxPanel = () => {
+      const [sandboxes, setSandboxes] = useState([
+        { id: 'sb-001', ip: '192.168.1.100', status: 'active', threats: 12, duration: '45 min' },
+        { id: 'sb-002', ip: '10.0.0.15', status: 'monitoring', threats: 3, duration: '12 min' },
+        { id: 'sb-003', ip: '172.16.0.50', status: 'isolated', threats: 8, duration: '2h 15min' }
+      ]);
+
+      return (
+        <div className="bg-gray-800 rounded-lg border border-gray-700 p-6">
+          <h2 className="text-xl font-semibold mb-4 flex items-center">
+            <i className="fas fa-cube text-purple-400 mr-2"></i>
+            Sandbox Environment
+          </h2>
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+            {sandboxes.map(sandbox => (
+              <div key={sandbox.id} className={`border rounded-lg p-4 ${
+                sandbox.status === 'active' ? 'border-green-500 soar-active' :
+                sandbox.status === 'monitoring' ? 'border-yellow-500' :
+                'border-red-500'
+              }`}>
+                <div className="flex justify-between items-center mb-2">
+                  <span className="font-semibold">{sandbox.id}</span>
+                  <span className={`text-xs px-2 py-1 rounded ${
+                    sandbox.status === 'active' ? 'bg-green-600' :
+                    sandbox.status === 'monitoring' ? 'bg-yellow-600' :
+                    'bg-red-600'
+                  }`}>
+                    {sandbox.status}
+                  </span>
+                </div>
+                <div className="text-sm text-gray-300 space-y-1">
+                  <div>IP: {sandbox.ip}</div>
+                  <div>Threats: {sandbox.threats}</div>
+                  <div>Duration: {sandbox.duration}</div>
+                </div>
+                <div className="mt-3 flex space-x-2">
+                  <button className="text-xs bg-blue-600 hover:bg-blue-700 px-2 py-1 rounded">
+                    <i className="fas fa-eye mr-1"></i> Monitor
+                  </button>
+                  <button className="text-xs bg-red-600 hover:bg-red-700 px-2 py-1 rounded">
+                    <i className="fas fa-stop mr-1"></i> Terminate
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      );
+    };
+
+    const FirewallPanel = () => {
+      const [rules, setRules] = useState([
+        { id: 1, ip: '147.32.84.165', action: 'BLOCK', reason: 'DDoS Attack', confidence: 0.93, timestamp: '14:32:15' },
+        { id: 2, ip: '192.168.1.168', action: 'RATE_LIMIT', reason: 'Port Scan', confidence: 0.76, timestamp: '14:28:42' },
+        { id: 3, ip: '10.0.2.15', action: 'MONITOR', reason: 'Suspicious Traffic', confidence: 0.68, timestamp: '14:25:18' },
+        { id: 4, ip: '172.16.0.50', action: 'BLOCK', reason: 'Malware C2', confidence: 0.89, timestamp: '14:22:33' }
+      ]);
+
+      return (
+        <div className="bg-gray-800 rounded-lg border border-gray-700 p-6">
+          <h2 className="text-xl font-semibold mb-4 flex items-center">
+            <i className="fas fa-shield-alt text-red-400 mr-2"></i>
+            Firewall Rules
+          </h2>
+          <div className="space-y-3">
+            {rules.map(rule => (
+              <div key={rule.id} className="border border-gray-600 rounded-lg p-4">
+                <div className="flex justify-between items-center">
+                  <div className="flex items-center space-x-3">
+                    <span className={`px-3 py-1 rounded text-sm font-semibold ${
+                      rule.action === 'BLOCK' ? 'bg-red-600' :
+                      rule.action === 'RATE_LIMIT' ? 'bg-orange-600' :
+                      'bg-blue-600'
+                    }`}>
+                      {rule.action}
+                    </span>
+                    <span className="font-mono">{rule.ip}</span>
+                  </div>
+                  <div className="text-sm text-gray-400">{rule.timestamp}</div>
+                </div>
+                <div className="mt-2 text-sm">
+                  <div className="text-gray-300">Reason: {rule.reason}</div>
+                  <div className="text-gray-400">Confidence: {(rule.confidence * 100).toFixed(1)}%</div>
+                </div>
+                <div className="mt-3 flex space-x-2">
+                  <button className="text-xs bg-gray-600 hover:bg-gray-700 px-2 py-1 rounded">
+                    <i className="fas fa-edit mr-1"></i> Edit
+                  </button>
+                  <button className="text-xs bg-red-600 hover:bg-red-700 px-2 py-1 rounded">
+                    <i className="fas fa-trash mr-1"></i> Remove
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      );
+    };
+
+    const LogsPanel = () => {
+      const [logs, setLogs] = useState([
+        { timestamp: '14:35:22', level: 'CRITICAL', message: 'SOAR BLOCK triggered for 147.32.84.165', details: 'DDoS attack detected, confidence 93%' },
+        { timestamp: '14:34:18', level: 'WARNING', message: 'Rate limit applied to 192.168.1.168', details: 'Port scan detected, confidence 76%' },
+        { timestamp: '14:33:45', level: 'INFO', message: 'Sandbox sb-001 created for IP 192.168.1.100', details: 'Isolation environment ready' },
+        { timestamp: '14:32:15', level: 'CRITICAL', message: 'Firewall rule added: BLOCK 147.32.84.165', details: 'Automatic SOAR response' },
+        { timestamp: '14:31:02', level: 'INFO', message: 'Threat detected: DDoS pattern', details: 'Source: 147.32.84.165, Target: web server' }
+      ]);
+
+      const getLevelColor = (level) => {
+        switch(level) {
+          case 'CRITICAL': return 'text-red-400 bg-red-900';
+          case 'WARNING': return 'text-yellow-400 bg-yellow-900';
+          case 'INFO': return 'text-blue-400 bg-blue-900';
+          default: return 'text-gray-400 bg-gray-900';
+        }
+      };
+
+      return (
+        <div className="bg-gray-800 rounded-lg border border-gray-700 p-6">
+          <h2 className="text-xl font-semibold mb-4 flex items-center">
+            <i className="fas fa-file-alt text-blue-400 mr-2"></i>
+            SOAR Logs
+          </h2>
+          <div className="space-y-2 max-h-96 overflow-y-auto">
+            {logs.map((log, idx) => (
+              <div key={idx} className="border border-gray-700 rounded-lg p-3">
+                <div className="flex justify-between items-center mb-1">
+                  <div className="flex items-center space-x-3">
+                    <span className={`text-xs px-2 py-1 rounded ${getLevelColor(log.level)}`}>
+                      {log.level}
+                    </span>
+                    <span className="text-sm text-gray-400">{log.timestamp}</span>
+                  </div>
+                </div>
+                <div className="text-sm font-medium">{log.message}</div>
+                <div className="text-xs text-gray-400 mt-1">{log.details}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+      );
+    };
+
+    const ActionsPanel = () => {
+      const [actions, setActions] = useState([
+        { id: 1, name: 'Block IP', icon: 'ban', color: 'red', description: 'Immediately block malicious IP addresses' },
+        { id: 2, name: 'Rate Limit', icon: 'tachometer-alt', color: 'orange', description: 'Throttle suspicious traffic patterns' },
+        { id: 3, name: 'Isolate Host', icon: 'cube', color: 'purple', description: 'Move compromised systems to sandbox' },
+        { id: 4, name: 'Quarantine', icon: 'user-lock', color: 'yellow', description: 'Restrict user access temporarily' },
+        { id: 5, name: 'Alert Admin', icon: 'bell', color: 'blue', description: 'Send notifications to security team' },
+        { id: 6, name: 'Log Event', icon: 'file-alt', color: 'gray', description: 'Record security incident details' }
+      ]);
+
+      const getColorClasses = (color) => {
+        const colors = {
+          red: 'bg-red-600 hover:bg-red-700',
+          orange: 'bg-orange-600 hover:bg-orange-700',
+          purple: 'bg-purple-600 hover:bg-purple-700',
+          yellow: 'bg-yellow-600 hover:bg-yellow-700',
+          blue: 'bg-blue-600 hover:bg-blue-700',
+          gray: 'bg-gray-600 hover:bg-gray-700'
+        };
+        return colors[color] || 'bg-gray-600';
+      };
+
+      return (
+        <div className="bg-gray-800 rounded-lg border border-gray-700 p-6">
+          <h2 className="text-xl font-semibold mb-4 flex items-center">
+            <i className="fas fa-play-circle text-green-400 mr-2"></i>
+            Available Actions
+          </h2>
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+            {actions.map(action => (
+              <div key={action.id} className="border border-gray-600 rounded-lg p-4">
+                <div className="flex items-center space-x-3 mb-2">
+                  <i className={`fas fa-${action.icon} text-${action.color}-400 text-lg`}></i>
+                  <span className="font-semibold">{action.name}</span>
+                </div>
+                <div className="text-sm text-gray-400 mb-3">{action.description}</div>
+                <button className={`w-full text-sm ${getColorClasses(action.color)} px-3 py-2 rounded transition-colors`}>
+                  Execute Action
+                </button>
+              </div>
+            ))}
+          </div>
+        </div>
+      );
+    };
+
+    const StatsPanel = () => {
+      const [stats, setStats] = useState({
+        blocked_ips: 24,
+        rate_limited: 18,
+        sandboxed: 7,
+        total_actions: 49,
+        success_rate: 96.8
+      });
+
+      return (
+        <div className="grid grid-cols-2 md:grid-cols-5 gap-4 mb-6">
+          <div className="bg-gray-800 border border-gray-700 rounded-lg p-4 text-center">
+            <i className="fas fa-ban text-red-400 text-2xl mb-2"></i>
+            <div className="text-2xl font-bold">{stats.blocked_ips}</div>
+            <div className="text-sm text-gray-400">Blocked IPs</div>
+          </div>
+          <div className="bg-gray-800 border border-gray-700 rounded-lg p-4 text-center">
+            <i className="fas fa-tachometer-alt text-orange-400 text-2xl mb-2"></i>
+            <div className="text-2xl font-bold">{stats.rate_limited}</div>
+            <div className="text-sm text-gray-400">Rate Limited</div>
+          </div>
+          <div className="bg-gray-800 border border-gray-700 rounded-lg p-4 text-center">
+            <i className="fas fa-cube text-purple-400 text-2xl mb-2"></i>
+            <div className="text-2xl font-bold">{stats.sandboxed}</div>
+            <div className="text-sm text-gray-400">Sandboxed</div>
+          </div>
+          <div className="bg-gray-800 border border-gray-700 rounded-lg p-4 text-center">
+            <i className="fas fa-play-circle text-green-400 text-2xl mb-2"></i>
+            <div className="text-2xl font-bold">{stats.total_actions}</div>
+            <div className="text-sm text-gray-400">Total Actions</div>
+          </div>
+          <div className="bg-gray-800 border border-gray-700 rounded-lg p-4 text-center">
+            <i className="fas fa-chart-line text-blue-400 text-2xl mb-2"></i>
+            <div className="text-2xl font-bold">{stats.success_rate}%</div>
+            <div className="text-sm text-gray-400">Success Rate</div>
+          </div>
+        </div>
+      );
+    };
+
+    const App = () => {
+      return (
+        <>
+          <Header />
+          <main className="container mx-auto px-6 py-6">
+            <StatsPanel />
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
+              <SandboxPanel />
+              <FirewallPanel />
+            </div>
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+              <LogsPanel />
+              <ActionsPanel />
+            </div>
+          </main>
+        </>
+      );
+    };
+
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(<App />);
+  </script>
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+</body>
+</html>

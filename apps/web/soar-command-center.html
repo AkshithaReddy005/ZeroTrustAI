@@ -1,0 +1,618 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>🤖 SOAR Command Center - ZeroTrust-AI</title>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" />
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <style>
+    @keyframes pulse-red {
+      0%, 100% { background-color: rgba(239, 68, 68, .1); }
+      50% { background-color: rgba(239, 68, 68, .2); }
+    }
+    @keyframes pulse-green {
+      0%, 100% { background-color: rgba(34, 197, 94, .1); }
+      50% { background-color: rgba(34, 197, 94, .2); }
+    }
+    .threat-high { animation: pulse-red 2s infinite; }
+    .soar-active { animation: pulse-green 2s infinite; }
+    .cyber-grid {
+      background-image: linear-gradient(rgba(168, 85, 247, .08) 1px, transparent 1px), 
+                        linear-gradient(90deg, rgba(168, 85, 247, .08) 1px, transparent 1px);
+      background-size: 50px 50px;
+    }
+    .timeline-line {
+      background: linear-gradient(180deg, #8b5cf6 0%, #3b82f6 100%);
+      width: 2px;
+      position: absolute;
+      left: 20px;
+      top: 0;
+      bottom: 0;
+    }
+  </style>
+</head>
+<body class="bg-gray-900 text-white cyber-grid">
+  <div id="root"></div>
+  <script type="text/babel">
+    const { useEffect, useState, useRef, useMemo } = React;
+    const API_BASE = 'http://localhost:9000';
+    const WS_URL = 'ws://localhost:9000/ws';
+
+    const Header = ({ connected, threatsCount, actionsCount }) => (
+      <header className="bg-gray-800 border-b border-purple-500 px-6 py-4">
+        <div className="container mx-auto flex justify-between items-center">
+          <div className="flex items-center space-x-4">
+            <i className="fas fa-robot text-purple-500 text-2xl"></i>
+            <h1 className="text-2xl font-bold">SOAR Command Center</h1>
+            <a href="http://localhost:9000" className="text-sm text-blue-400 hover:text-blue-300">
+              <i className="fas fa-arrow-left mr-1"></i> Back to SOC
+            </a>
+          </div>
+          <div className="flex items-center space-x-6">
+            <div className="flex items-center space-x-4">
+              <div className="text-center">
+                <div className="text-lg font-bold text-red-400">{threatsCount}</div>
+                <div className="text-xs text-gray-400">Threats</div>
+              </div>
+              <div className="text-center">
+                <div className="text-lg font-bold text-green-400">{actionsCount}</div>
+                <div className="text-xs text-gray-400">Actions</div>
+              </div>
+            </div>
+            <span className="flex items-center">
+              <span className={`w-3 h-3 ${connected ? 'bg-green-500' : 'bg-red-500'} rounded-full mr-2 animate-pulse`}></span>
+              <span className="text-sm">{connected ? 'Connected' : 'Disconnected'}</span>
+            </span>
+            <span className="text-sm text-gray-400">{new Date().toLocaleString()}</span>
+          </div>
+        </div>
+      </header>
+    );
+
+    const ThreatCard = ({ threat, onAction, isProcessing }) => {
+      const [expanded, setExpanded] = useState(false);
+      const severityColors = {
+        critical: 'border-red-500 threat-high',
+        high: 'border-orange-500',
+        medium: 'border-yellow-500',
+        low: 'border-blue-500'
+      };
+
+      const actionButtons = [
+        { id: 'block', label: 'Block IP', icon: 'ban', color: 'red' },
+        { id: 'rate_limit', label: 'Rate Limit', icon: 'tachometer-alt', color: 'orange' },
+        { id: 'isolate', label: 'Isolate Host', icon: 'cube', color: 'purple' },
+        { id: 'monitor', label: 'Monitor', icon: 'eye', color: 'blue' }
+      ];
+
+      return (
+        <div className={`bg-gray-800 border rounded-lg p-4 ${severityColors[threat.severity] || 'border-gray-700'} ${isProcessing ? 'opacity-50' : ''}`}>
+          <div className="flex justify-between items-start mb-3">
+            <div className="flex items-center space-x-3">
+              <span className={`px-2 py-1 rounded text-xs font-semibold ${
+                threat.severity === 'critical' ? 'bg-red-600' :
+                threat.severity === 'high' ? 'bg-orange-600' :
+                threat.severity === 'medium' ? 'bg-yellow-600' :
+                'bg-blue-600'
+              }`}>
+                {threat.severity?.toUpperCase()}
+              </span>
+              <span className="text-sm text-gray-400">{new Date(threat.timestamp).toLocaleTimeString()}</span>
+              {threat.automatic && (
+                <span className="px-2 py-1 bg-green-600 rounded text-xs">
+                  <i className="fas fa-robot mr-1"></i>Auto
+                </span>
+              )}
+            </div>
+            <button 
+              onClick={() => setExpanded(!expanded)}
+              className="text-gray-400 hover:text-white"
+            >
+              <i className={`fas fa-chevron-${expanded ? 'up' : 'down'}`}></i>
+            </button>
+          </div>
+
+          <div className="space-y-2">
+            <div className="flex justify-between">
+              <span className="text-gray-400">Attack Type:</span>
+              <span className="font-semibold">{threat.attack_type}</span>
+            </div>
+            <div className="flex justify-between">
+              <span className="text-gray-400">Source IP:</span>
+              <span className="font-mono">{threat.source_ip}</span>
+            </div>
+            <div className="flex justify-between">
+              <span className="text-gray-400">Confidence:</span>
+              <span>{Math.round((threat.confidence || 0) * 100)}%</span>
+            </div>
+            <div className="flex justify-between">
+              <span className="text-gray-400">Status:</span>
+              <span className={threat.blocked ? 'text-red-400' : 'text-green-400'}>
+                {threat.blocked ? 'Blocked' : 'Active'}
+              </span>
+            </div>
+          </div>
+
+          {expanded && (
+            <div className="mt-3 pt-3 border-t border-gray-700">
+              <div className="text-sm text-gray-300 mb-3">
+                <div className="font-semibold mb-1">Reasons:</div>
+                <div>{threat.reason?.join(', ') || 'No reasons provided'}</div>
+              </div>
+              <div className="grid grid-cols-2 gap-2">
+                {actionButtons.map(action => (
+                  <button
+                    key={action.id}
+                    onClick={() => onAction(threat, action.id)}
+                    disabled={isProcessing}
+                    className={`bg-${action.color}-600 hover:bg-${action.color}-700 disabled:opacity-50 px-3 py-2 rounded text-sm flex items-center justify-center space-x-2 transition-colors`}
+                  >
+                    <i className={`fas fa-${action.icon}`}></i>
+                    <span>{action.label}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      );
+    };
+
+    const ActionTimeline = ({ actions }) => {
+      const timelineRef = useRef(null);
+
+      const sortedActions = useMemo(() => 
+        [...actions].sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp))
+      , [actions]);
+
+      return (
+        <div className="bg-gray-800 rounded-lg border border-gray-700 p-6">
+          <h2 className="text-xl font-semibold mb-4 flex items-center">
+            <i className="fas fa-history text-purple-400 mr-2"></i>
+            Action Timeline
+          </h2>
+          <div className="relative max-h-96 overflow-y-auto">
+            <div className="timeline-line"></div>
+            {sortedActions.length === 0 ? (
+              <div className="text-center text-gray-500 py-8">
+                <i className="fas fa-history text-4xl mb-3"></i>
+                <p>No automated actions yet</p>
+              </div>
+            ) : (
+              <div className="space-y-4">
+                {sortedActions.map((action, idx) => (
+                  <div key={idx} className="flex items-start space-x-4">
+                    <div className={`w-4 h-4 rounded-full border-2 border-gray-800 z-10 ${
+                      action.status === 'success' ? 'bg-green-500' :
+                      action.status === 'failed' ? 'bg-red-500' :
+                      'bg-yellow-500'
+                    }`}></div>
+                    <div className="flex-1 bg-gray-700 rounded-lg p-3">
+                      <div className="flex justify-between items-start mb-2">
+                        <div className="flex items-center space-x-2">
+                          <span className={`px-2 py-1 rounded text-xs font-semibold ${
+                            action.action === 'BLOCK' ? 'bg-red-600' :
+                            action.action === 'RATE_LIMIT' ? 'bg-orange-600' :
+                            action.action === 'ISOLATE' ? 'bg-purple-600' :
+                            'bg-blue-600'
+                          }`}>
+                            {action.action}
+                          </span>
+                          {action.automatic && (
+                            <span className="px-2 py-1 bg-green-600 rounded text-xs">
+                              <i className="fas fa-robot mr-1"></i>Auto
+                            </span>
+                          )}
+                          {action.manual && (
+                            <span className="px-2 py-1 bg-blue-600 rounded text-xs">
+                              <i className="fas fa-user mr-1"></i>Manual
+                            </span>
+                          )}
+                        </div>
+                        <div className="text-right">
+                          <span className="text-xs text-gray-400">
+                            {new Date(action.timestamp).toLocaleTimeString()}
+                          </span>
+                          {action.processingTime && (
+                            <div className="text-xs text-gray-500">
+                              {action.processingTime.toFixed(0)}ms
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                      <div className="text-sm">
+                        <div className="text-gray-300">Target: {action.target}</div>
+                        <div className="text-gray-400">Reason: {action.reason}</div>
+                        <div className="flex justify-between items-center mt-1">
+                          <div className="text-gray-500 text-xs">
+                            Confidence: {Math.round((action.confidence || 0) * 100)}%
+                          </div>
+                          {action.attackType && (
+                            <div className="text-purple-400 text-xs">
+                              {action.attackType}
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      );
+    };
+
+    const MetricsPanel = ({ threats, actions }) => {
+      const [chartData, setChartData] = useState({ labels: [], block: [], rateLimit: [], isolate: [] });
+      const chartRef = useRef(null);
+
+      useEffect(() => {
+        const now = new Date();
+        const labels = [];
+        const block = [];
+        const rateLimit = [];
+        const isolate = [];
+
+        for (let i = 23; i >= 0; i--) {
+          const time = new Date(now - i * 60 * 60 * 1000);
+          labels.push(time.getHours() + ':00');
+          
+          const hourActions = actions.filter(a => 
+            new Date(a.timestamp).getHours() === time.getHours()
+          );
+          
+          block.push(hourActions.filter(a => a.action === 'BLOCK').length);
+          rateLimit.push(hourActions.filter(a => a.action === 'RATE_LIMIT').length);
+          isolate.push(hourActions.filter(a => a.action === 'ISOLATE').length);
+        }
+
+        setChartData({ labels, block, rateLimit, isolate });
+      }, [actions]);
+
+      useEffect(() => {
+        if (chartRef.current && chartData.labels.length > 0) {
+          const ctx = chartRef.current.getContext('2d');
+          if (chartRef.current._chart) {
+            chartRef.current._chart.destroy();
+          }
+          
+          chartRef.current._chart = new Chart(ctx, {
+            type: 'line',
+            data: {
+              labels: chartData.labels,
+              datasets: [
+                {
+                  label: 'Block Actions',
+                  data: chartData.block,
+                  borderColor: '#ef4444',
+                  backgroundColor: 'rgba(239, 68, 68, 0.1)',
+                  tension: 0.4
+                },
+                {
+                  label: 'Rate Limit Actions',
+                  data: chartData.rateLimit,
+                  borderColor: '#f59e0b',
+                  backgroundColor: 'rgba(245, 158, 11, 0.1)',
+                  tension: 0.4
+                },
+                {
+                  label: 'Isolate Actions',
+                  data: chartData.isolate,
+                  borderColor: '#8b5cf6',
+                  backgroundColor: 'rgba(139, 92, 246, 0.1)',
+                  tension: 0.4
+                }
+              ]
+            },
+            options: {
+              responsive: true,
+              maintainAspectRatio: false,
+              plugins: {
+                legend: {
+                  labels: { color: '#e5e7eb' }
+                }
+              },
+              scales: {
+                x: {
+                  ticks: { color: '#9ca3af' },
+                  grid: { color: 'rgba(156, 163, 175, 0.1)' }
+                },
+                y: {
+                  ticks: { color: '#9ca3af' },
+                  grid: { color: 'rgba(156, 163, 175, 0.1)' }
+                }
+              }
+            }
+          });
+        }
+      }, [chartData]);
+
+      const stats = useMemo(() => {
+        const recentThreats = threats.filter(t => 
+          new Date(t.timestamp) > new Date() - 60 * 60 * 1000
+        );
+        const recentActions = actions.filter(a => 
+          new Date(a.timestamp) > new Date() - 60 * 60 * 1000
+        );
+
+        return {
+          totalThreats: threats.length,
+          recentThreats: recentThreats.length,
+          totalActions: actions.length,
+          recentActions: recentActions.length,
+          blocked: actions.filter(a => a.action === 'BLOCK').length,
+          rateLimited: actions.filter(a => a.action === 'RATE_LIMIT').length,
+          isolated: actions.filter(a => a.action === 'ISOLATE').length,
+          successRate: actions.length > 0 ? 
+            (actions.filter(a => a.status === 'success').length / actions.length * 100).toFixed(1) : 0
+        };
+      }, [threats, actions]);
+
+      return (
+        <div className="space-y-6">
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+            <div className="bg-gray-800 border border-gray-700 rounded-lg p-4 text-center">
+              <i className="fas fa-shield-alt text-red-400 text-2xl mb-2"></i>
+              <div className="text-2xl font-bold">{stats.totalThreats}</div>
+              <div className="text-sm text-gray-400">Total Threats</div>
+            </div>
+            <div className="bg-gray-800 border border-gray-700 rounded-lg p-4 text-center">
+              <i className="fas fa-play-circle text-green-400 text-2xl mb-2"></i>
+              <div className="text-2xl font-bold">{stats.totalActions}</div>
+              <div className="text-sm text-gray-400">Total Actions</div>
+            </div>
+            <div className="bg-gray-800 border border-gray-700 rounded-lg p-4 text-center">
+              <i className="fas fa-ban text-orange-400 text-2xl mb-2"></i>
+              <div className="text-2xl font-bold">{stats.blocked}</div>
+              <div className="text-sm text-gray-400">Blocked IPs</div>
+            </div>
+            <div className="bg-gray-800 border border-gray-700 rounded-lg p-4 text-center">
+              <i className="fas fa-chart-line text-blue-400 text-2xl mb-2"></i>
+              <div className="text-2xl font-bold">{stats.successRate}%</div>
+              <div className="text-sm text-gray-400">Success Rate</div>
+            </div>
+          </div>
+
+          <div className="bg-gray-800 border border-gray-700 rounded-lg p-6">
+            <h3 className="text-lg font-semibold mb-4 flex items-center">
+              <i className="fas fa-chart-area text-purple-400 mr-2"></i>
+              24-Hour Action Trends
+            </h3>
+            <div style={{ height: '300px' }}>
+              <canvas ref={chartRef}></canvas>
+            </div>
+          </div>
+        </div>
+      );
+    };
+
+    const App = () => {
+      const [connected, setConnected] = useState(false);
+      const [threats, setThreats] = useState([]);
+      const [actions, setActions] = useState([]);
+      const [processingThreats, setProcessingThreats] = useState(new Set());
+
+      // Load initial threats from API
+      useEffect(() => {
+        fetch(`${API_BASE}/threats?limit=100`)
+          .then(r => r.ok ? r.json() : { threats: [] })
+          .then(data => {
+            const threatArray = Array.isArray(data) ? data : (data.threats || []);
+            setThreats(threatArray.filter(t => t.label === 'malicious' || t.confidence >= 0.70));
+          })
+          .catch(() => {});
+      }, []);
+
+      // WebSocket connection for real-time updates
+      useEffect(() => {
+        let ws = null;
+        let reconnectInterval = null;
+        
+        const connect = () => {
+          console.log('🔌 SOAR: Connecting to WebSocket...');
+          ws = new WebSocket(WS_URL);
+          
+          ws.onopen = () => {
+            console.log('✅ SOAR: WebSocket connected');
+            setConnected(true);
+            if (reconnectInterval) {
+              clearInterval(reconnectInterval);
+              reconnectInterval = null;
+            }
+          };
+          
+          ws.onclose = () => {
+            console.log('❌ SOAR: WebSocket disconnected');
+            setConnected(false);
+            if (!reconnectInterval) {
+              reconnectInterval = setInterval(connect, 3000);
+            }
+          };
+          
+          ws.onerror = (error) => {
+            console.log('🚨 SOAR: WebSocket error:', error);
+            setConnected(false);
+          };
+          
+          ws.onmessage = (ev) => {
+            try {
+              const msg = JSON.parse(ev.data);
+              if (msg.type === 'new_threat' && msg.data) {
+                const threat = Array.isArray(msg.data) ? msg.data[0] : msg.data;
+                
+                // Process all threats, not just malicious ones
+                if (threat.label === 'malicious' || threat.confidence >= 0.70) {
+                  setThreats(prev => {
+                    const updated = [threat, ...prev];
+                    return updated.slice(0, 100);
+                  });
+
+                  // Enhanced SOAR automation logic
+                  const confidence = threat.confidence || 0;
+                  const reasons = threat.reason || [];
+                  const isVolumetric = reasons.some(r => 
+                    r.includes('high_packets_per_second') || 
+                    r.includes('syn_flood') || 
+                    r.includes('ddos') ||
+                    r.includes('port_sweep')
+                  );
+                  
+                  // Determine SOAR action based on confidence and threat characteristics
+                  let actionType = null;
+                  let actionReason = '';
+                  
+                  if (confidence >= 0.90) {
+                    actionType = 'BLOCK';
+                    actionReason = `Critical confidence threat: ${reasons.join(', ')}`;
+                  } else if (confidence >= 0.85 && isVolumetric) {
+                    actionType = 'BLOCK';
+                    actionReason = `High confidence volumetric attack: ${reasons.join(', ')}`;
+                  } else if (confidence >= 0.70 && isVolumetric) {
+                    actionType = 'RATE_LIMIT';
+                    actionReason = `Medium confidence volumetric threat: ${reasons.join(', ')}`;
+                  } else if (confidence >= 0.75) {
+                    actionType = 'RATE_LIMIT';
+                    actionReason = `Medium-high confidence threat: ${reasons.join(', ')}`;
+                  } else if (confidence >= 0.60) {
+                    actionType = 'MONITOR';
+                    actionReason = `Suspicious activity detected: ${reasons.join(', ')}`;
+                  }
+
+                  // Execute automated SOAR action
+                  if (actionType) {
+                    const action = {
+                      id: Date.now() + Math.random(),
+                      action: actionType,
+                      target: threat.source_ip,
+                      reason: actionReason,
+                      confidence: confidence,
+                      timestamp: new Date().toISOString(),
+                      status: 'success',
+                      threatId: threat.flow_id,
+                      attackType: threat.attack_type,
+                      severity: threat.severity,
+                      automatic: true,
+                      processingTime: Math.random() * 500 + 100 // Simulate processing time
+                    };
+                    
+                    setActions(prev => [action, ...prev].slice(0, 200));
+                    
+                    // Log SOAR decision
+                    console.log(`🤖 SOAR Action: ${actionType} on ${threat.source_ip} (confidence: ${(confidence * 100).toFixed(1)}%)`);
+                  }
+                }
+              }
+            } catch (e) {
+              console.error('❌ SOAR: Error parsing message:', e);
+            }
+          };
+        };
+        
+        connect();
+        
+        return () => {
+          if (reconnectInterval) clearInterval(reconnectInterval);
+          if (ws) ws.close();
+        };
+      }, []);
+
+      const handleAction = async (threat, actionType) => {
+        // Add to processing set
+        setProcessingThreats(prev => new Set(prev).add(threat.flow_id));
+        
+        try {
+          // Simulate processing delay
+          await new Promise(resolve => setTimeout(resolve, 500 + Math.random() * 1000));
+          
+          const action = {
+            id: Date.now() + Math.random(),
+            action: actionType.toUpperCase(),
+            target: threat.source_ip,
+            reason: `Manual ${actionType} action by operator`,
+            confidence: threat.confidence,
+            timestamp: new Date().toISOString(),
+            status: 'success',
+            threatId: threat.flow_id,
+            attackType: threat.attack_type,
+            severity: threat.severity,
+            manual: true,
+            processingTime: 500 + Math.random() * 1000
+          };
+          
+          setActions(prev => [action, ...prev].slice(0, 200));
+          
+          // Update threat status if blocking
+          if (actionType === 'block') {
+            setThreats(prev => prev.map(t => 
+              t.flow_id === threat.flow_id ? { ...t, blocked: true } : t
+            ));
+          }
+          
+          console.log(`👤 Manual SOAR Action: ${actionType} on ${threat.source_ip}`);
+        } catch (error) {
+          console.error('❌ Error executing manual action:', error);
+        } finally {
+          // Remove from processing set
+          setProcessingThreats(prev => {
+            const newSet = new Set(prev);
+            newSet.delete(threat.flow_id);
+            return newSet;
+          });
+        }
+      };
+
+      const activeThreats = threats.filter(t => !t.blocked);
+      const recentThreats = activeThreats.slice(0, 10);
+
+      return (
+        <>
+          <Header connected={connected} threatsCount={activeThreats.length} actionsCount={actions.length} />
+          <main className="container mx-auto px-6 py-6">
+            <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+              <div className="lg:col-span-2">
+                <div className="bg-gray-800 rounded-lg border border-gray-700 p-6 mb-6">
+                  <h2 className="text-xl font-semibold mb-4 flex items-center">
+                    <i className="fas fa-exclamation-triangle text-red-400 mr-2"></i>
+                    Active Threats ({activeThreats.length})
+                  </h2>
+                  <div className="space-y-3 max-h-96 overflow-y-auto">
+                    {recentThreats.length === 0 ? (
+                      <div className="text-center text-gray-500 py-8">
+                        <i className="fas fa-shield-alt text-4xl mb-3"></i>
+                        <p>No active threats detected</p>
+                      </div>
+                    ) : (
+                      recentThreats.map(threat => (
+                        <ThreatCard 
+                          key={threat.flow_id} 
+                          threat={threat} 
+                          onAction={handleAction}
+                          isProcessing={processingThreats.has(threat.flow_id)}
+                        />
+                      ))
+                    )}
+                  </div>
+                </div>
+                <ActionTimeline actions={actions} />
+              </div>
+              <div className="space-y-6">
+                <MetricsPanel threats={threats} actions={actions} />
+              </div>
+            </div>
+          </main>
+        </>
+      );
+    };
+
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(<App />);
+  </script>
+</body>
+</html>

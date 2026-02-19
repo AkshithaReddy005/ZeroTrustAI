@@ -287,7 +287,15 @@ def get_attack_type(row):
 
 
 def build_event(row, at, tcn_s, ae_s, iso_s, conf):
-    is_mal = at not in ("benign","normal")
+    csv_label = str(row.get("label", "0")).strip()
+    if csv_label in ["1", "malicious", "attack"]:
+        true_label = "malicious"
+        true_attack = at if at not in ("benign","normal") else "malicious"
+    else:
+        true_label = "benign"
+        true_attack = "benign"
+    
+    is_mal = true_label == "malicious"
     sev = "critical" if conf>=0.90 else "high" if conf>=0.75 else "medium" if conf>=0.55 else "low"
     src = str(row.get("src_ip","") or "").strip()
     dst = str(row.get("dst_ip","") or "").strip()
@@ -299,15 +307,15 @@ def build_event(row, at, tcn_s, ae_s, iso_s, conf):
         dp = int(row.get("dst_port",443) or 443)
         proto = "TCP" if int(row.get("protocol",6) or 6)==6 else "UDP"
         fid = f"{src}:{sp}->{dst}:{dp}/{proto}"
-    tactic, tech = MITRE.get(at, ("Unknown","T1071"))
-    reasons = list(REASONS.get(at, ["anomalous_flow"]))
+    tactic, tech = MITRE.get(true_attack, ("Unknown","T1071"))
+    reasons = list(REASONS.get(true_attack, ["anomalous_flow"]))
     pps = float(row.get("pps",0) or 0)
     if pps>500 and "high_packets_per_second" not in reasons:
         reasons.insert(0,"high_packets_per_second")
     return {
-        "flow_id":fid,"label":"malicious" if is_mal else "benign",
+        "flow_id":fid,"label":true_label,
         "confidence":round(conf,4),"risk_score":round(conf,4),"severity":sev,
-        "attack_type":at if is_mal else "benign","source_ip":src,"destination_ip":dst,
+        "attack_type":true_attack,"source_ip":src,"destination_ip":dst,
         "mitre_tactic":tactic,"mitre_technique":tech,"reason":reasons,
         "blocked":is_mal and conf>=0.85,"anomaly_score":round(iso_s,4),
         "timestamp":datetime.now(timezone.utc).isoformat(),

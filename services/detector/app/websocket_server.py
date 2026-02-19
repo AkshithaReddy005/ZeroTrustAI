@@ -404,6 +404,24 @@ async def get_web_interface():
     except FileNotFoundError:
         return "<h1>Web interface not found. Run from project root.</h1>"
 
+@app.get("/soar-dashboard.html", response_class=HTMLResponse)
+async def get_soar_dashboard():
+    """Serve SOAR dashboard interface"""
+    try:
+        with open("c:/Users/shrey/Desktop/techsavishakara/techs/ZeroTrustAI/apps/web/soar-dashboard.html", "r", encoding="utf-8") as f:
+            return f.read()
+    except FileNotFoundError:
+        return "<h1>SOAR dashboard not found.</h1>"
+
+@app.get("/soar-command-center.html", response_class=HTMLResponse)
+async def get_soar_command_center():
+    """Serve SOAR Command Center interface"""
+    try:
+        with open("c:/Users/shrey/Desktop/techsavishakara/techs/ZeroTrustAI/apps/web/soar-command-center.html", "r", encoding="utf-8") as f:
+            return f.read()
+    except FileNotFoundError:
+        return "<h1>SOAR Command Center not found.</h1>"
+
 # Simulation endpoint for testing
 @app.post("/simulate-threats")
 async def simulate_threats(count: int = 10):
