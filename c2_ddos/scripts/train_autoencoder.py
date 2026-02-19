@@ -84,6 +84,52 @@ def get_feature_matrix(df: pd.DataFrame) -> np.ndarray:
     return df[ALL_FEATURES].fillna(0).replace([np.inf, -np.inf], 0).values.astype(np.float32)
 
 
+def _derive_missing_volumetric_features(df: pd.DataFrame, eps: float = 1e-6) -> pd.DataFrame:
+    df = df.copy()
+    needed = [c for c in VOLUMETRIC_FEATURES if c not in df.columns]
+    if not needed:
+        return df
+
+    duration = pd.to_numeric(df.get("duration", 0.0), errors="coerce").fillna(0.0).astype(float)
+    total_packets = pd.to_numeric(df.get("total_packets", 0.0), errors="coerce").fillna(0.0).astype(float)
+    total_bytes = pd.to_numeric(df.get("total_bytes", 0.0), errors="coerce").fillna(0.0).astype(float)
+
+    if "pps" in needed:
+        df["pps"] = total_packets / (duration + eps)
+    if "bps" in needed:
+        df["bps"] = total_bytes / (duration + eps)
+    if "mean_packet_size" in needed:
+        df["mean_packet_size"] = total_bytes / (np.maximum(total_packets, 1.0))
+    if "mean_iat" in needed:
+        df["mean_iat"] = duration / (np.maximum(total_packets - 1.0, 1.0))
+
+    if "burstiness" in needed:
+        iat_cols_20 = [f"splt_iat_{i}" for i in range(1, 21)]
+        present_iats = [c for c in iat_cols_20 if c in df.columns]
+        if present_iats:
+            df["burstiness"] = df[present_iats].std(axis=1).fillna(0.0)
+        else:
+            df["burstiness"] = 0.0
+
+    if "pseudo_upload_bytes" in needed or "pseudo_download_bytes" in needed:
+        len_cols_20 = [f"splt_len_{i}" for i in range(1, 21)]
+        present_lens = [c for c in len_cols_20 if c in df.columns]
+        if present_lens:
+            odd_len_cols = [f"splt_len_{i}" for i in range(1, 21, 2) if f"splt_len_{i}" in df.columns]
+            even_len_cols = [f"splt_len_{i}" for i in range(2, 21, 2) if f"splt_len_{i}" in df.columns]
+            if "pseudo_upload_bytes" in needed:
+                df["pseudo_upload_bytes"] = df[odd_len_cols].sum(axis=1) if odd_len_cols else 0.0
+            if "pseudo_download_bytes" in needed:
+                df["pseudo_download_bytes"] = df[even_len_cols].sum(axis=1) if even_len_cols else 0.0
+        else:
+            if "pseudo_upload_bytes" in needed:
+                df["pseudo_upload_bytes"] = 0.0
+            if "pseudo_download_bytes" in needed:
+                df["pseudo_download_bytes"] = 0.0
+
+    return df
+
+
 # ─────────────────────────────────────────────
 # TRAINING
 # ─────────────────────────────────────────────
@@ -93,7 +139,7 @@ def train_autoencoder(
     model_dir: str = "models",
     epochs: int = 50,
     batch_size: int = 256,
-    lr: float = 1e-3,
+    lr: float = 1e-4,
     benign_limit: int = 80_000,
 ) -> tuple:
     """
@@ -106,6 +152,7 @@ def train_autoencoder(
 
     # Load data — benign ONLY
     df = pd.read_csv(data_path)
+    df = _derive_missing_volumetric_features(df)
     label_col = 'label' if 'label' in df.columns else 'Label'
     benign_df = df[df[label_col] == 0].head(benign_limit).copy()
     logger.info(f"Benign samples for AE training: {len(benign_df):,}")
@@ -122,6 +169,18 @@ def train_autoencoder(
     scaler = RobustScaler()
     X_train_scaled = scaler.fit_transform(X_train).astype(np.float32)
     X_val_scaled = scaler.transform(X_val).astype(np.float32)
+
+    # Clamp extreme values to avoid exploding loss due to pathological outliers
+    X_train_scaled = np.clip(X_train_scaled, -10.0, 10.0)
+    X_val_scaled = np.clip(X_val_scaled, -10.0, 10.0)
+
+    logger.info(
+        "Scaled feature stats (train): "
+        f"min={float(np.min(X_train_scaled)):.3f}, "
+        f"max={float(np.max(X_train_scaled)):.3f}, "
+        f"mean={float(np.mean(X_train_scaled)):.3f}, "
+        f"std={float(np.std(X_train_scaled)):.3f}"
+    )
 
     Path(model_dir).mkdir(parents=True, exist_ok=True)
     joblib.dump(scaler, Path(model_dir) / "ae_scaler.pkl")
@@ -147,6 +206,7 @@ def train_autoencoder(
             recon = model(batch_x)
             loss = criterion(recon, batch_x)
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
             total_loss += loss.item()
         avg_loss = total_loss / len(train_loader)
@@ -222,7 +282,7 @@ def score_autoencoder(model: Autoencoder, scaler: RobustScaler, X: np.ndarray, t
 
 
 if __name__ == "__main__":
-    DATA_PATH = "data/processed/phase1_processed.csv"
+    DATA_PATH = "../../data/processed/phase1_processed.csv"
     if not Path(DATA_PATH).exists():
-        DATA_PATH = "data/processed/final_balanced_240k.csv"
+        DATA_PATH = "../../data/processed/final_balanced_240k.csv"
     train_autoencoder(DATA_PATH)
