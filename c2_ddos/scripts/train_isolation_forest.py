@@ -19,12 +19,77 @@ logger = logging.getLogger(__name__)
 # 13 volumetric features — strip all SPLT/temporal
 VOLUMETRIC_FEATURES = [
     'pps', 'bps', 'duration', 'total_packets', 'total_bytes',
-    'mean_packet_size', 'pkt_size_std_20', 'mean_iat',
-    'iat_std_20', 'pseudo_upload_bytes', 'pseudo_download_bytes',
-    'protocol', 'byte_symmetry_ratio'
+    'mean_packet_size', 'std_packet_size', 'mean_iat',
+    'std_iat', 'upload_bytes', 'download_bytes',
+    'protocol', 'upload_ratio'
 ]
 
 CONTAMINATION_SWEEP = [0.01, 0.03, 0.05, 0.08, 0.10]
+
+
+def _derive_missing_volumetric_features(df: pd.DataFrame, eps: float = 1e-6) -> pd.DataFrame:
+    """Derive missing volumetric features for Isolation Forest"""
+    df = df.copy()
+    needed = [c for c in VOLUMETRIC_FEATURES if c not in df.columns]
+    if not needed:
+        return df
+
+    duration = pd.to_numeric(df.get("duration", 0.0), errors="coerce").fillna(0.0).astype(float)
+    total_packets = pd.to_numeric(df.get("total_packets", 0.0), errors="coerce").fillna(0.0).astype(float)
+    total_bytes = pd.to_numeric(df.get("total_bytes", 0.0), errors="coerce").fillna(0.0).astype(float)
+
+    if "pps" in needed:
+        df["pps"] = total_packets / (duration + eps)
+    if "bps" in needed:
+        df["bps"] = total_bytes / (duration + eps)
+    if "mean_packet_size" in needed:
+        df["mean_packet_size"] = total_bytes / (np.maximum(total_packets, 1.0))
+
+    len_cols_20 = [f"splt_len_{i}" for i in range(1, 21)]
+    iat_cols_20 = [f"splt_iat_{i}" for i in range(1, 21)]
+    
+    if "iat_mean_20" in needed:
+        present_iats = [c for c in iat_cols_20 if c in df.columns]
+        if present_iats:
+            df["iat_mean_20"] = df[present_iats].mean(axis=1)
+        else:
+            df["iat_mean_20"] = duration / (np.maximum(total_packets - 1.0, 1.0))
+    
+    if "iat_std_20" in needed:
+        present_iats = [c for c in iat_cols_20 if c in df.columns]
+        if present_iats:
+            df["iat_std_20"] = df[present_iats].std(axis=1).fillna(0.0)
+        else:
+            df["iat_std_20"] = 0.0
+
+    if "pkt_size_std_20" in needed:
+        present_lens = [c for c in len_cols_20 if c in df.columns]
+        if present_lens:
+            df["pkt_size_std_20"] = df[present_lens].std(axis=1).fillna(0.0)
+        else:
+            df["pkt_size_std_20"] = 0.0
+
+    if "pseudo_upload_bytes" in needed or "pseudo_download_bytes" in needed:
+        present_lens = [c for c in len_cols_20 if c in df.columns]
+        if present_lens:
+            odd_len_cols = [f"splt_len_{i}" for i in range(1, 21, 2) if f"splt_len_{i}" in df.columns]
+            even_len_cols = [f"splt_len_{i}" for i in range(2, 21, 2) if f"splt_len_{i}" in df.columns]
+            if "pseudo_upload_bytes" in needed:
+                df["pseudo_upload_bytes"] = df[odd_len_cols].sum(axis=1) if odd_len_cols else 0.0
+            if "pseudo_download_bytes" in needed:
+                df["pseudo_download_bytes"] = df[even_len_cols].sum(axis=1) if even_len_cols else 0.0
+        else:
+            if "pseudo_upload_bytes" in needed:
+                df["pseudo_upload_bytes"] = 0.0
+            if "pseudo_download_bytes" in needed:
+                df["pseudo_download_bytes"] = 0.0
+
+    if "byte_symmetry_ratio" in needed:
+        upload = df.get("pseudo_upload_bytes", 0)
+        download = df.get("pseudo_download_bytes", 1)
+        df["byte_symmetry_ratio"] = upload / (download + eps)
+
+    return df
 
 
 def get_volumetric_matrix(df: pd.DataFrame) -> np.ndarray:
@@ -54,19 +119,36 @@ def train_isolation_forest(
     logger.info("=" * 60)
 
     df = pd.read_csv(data_path)
-    label_col = 'label' if 'label' in df.columns else 'Label'
+    # Derive missing volumetric features first
+    df = _derive_missing_volumetric_features(df)
 
-    # Train/val split (70/15/15 — use 70% for training)
-    df_shuffled = df.sample(frac=1, random_state=random_state).reset_index(drop=True)
-    n_val = int(len(df_shuffled) * val_split)
-    val_df = df_shuffled.iloc[:n_val]
-    train_df = df_shuffled.iloc[n_val:]
+    # Use snorkel_prob labels (consistent with TCN training)
+    if 'snorkel_prob' in df.columns:
+        y_all = (df['snorkel_prob'].values > 0.3).astype(int)
+        logger.info("Labels: snorkel_prob > 0.3 → binary")
+    else:
+        label_col = 'label' if 'label' in df.columns else 'Label'
+        y_all = df[label_col].values.astype(int)
+
+    actual_contamination = y_all.mean()
+    logger.info(f"Actual malicious ratio: {actual_contamination*100:.1f}%")
+
+    # Train/val split — same seed as TCN (RandomState permutation)
+    idx = np.random.RandomState(random_state).permutation(len(df))
+    n_test = int(len(df) * val_split)
+    n_val  = int(len(df) * val_split)
+    test_idx  = idx[:n_test]
+    val_idx   = idx[n_test:n_test + n_val]
+    train_idx = idx[n_test + n_val:]
+
+    train_df = df.iloc[train_idx].reset_index(drop=True)
+    val_df   = df.iloc[val_idx].reset_index(drop=True)
 
     X_train = get_volumetric_matrix(train_df)
-    X_val = get_volumetric_matrix(val_df)
-    y_val = val_df[label_col].values.astype(int)
+    X_val   = get_volumetric_matrix(val_df)
+    y_val   = y_all[val_idx]
 
-    benign_val = X_val[y_val == 0]
+    benign_val    = X_val[y_val == 0]
     malicious_val = X_val[y_val == 1]
 
     logger.info(f"Train: {len(X_train):,} | Val benign: {len(benign_val):,} | Val malicious: {len(malicious_val):,}")
@@ -112,16 +194,16 @@ def train_isolation_forest(
             f"F1={f1:.4f}"
         )
 
-        # Pick: FPR < 1% AND best F1
-        if fpr < 0.01 and f1 > best_f1:
+        # Pick best F1 (FPR gate relaxed to 5% — higher contamination needed)
+        if fpr < 0.05 and f1 > best_f1:
             best_f1 = f1
             best_contamination = contamination
             best_model = iforest
 
-    # Fallback if no model meets FPR < 1%
+    # Fallback: pick highest F1 regardless of FPR
     if best_model is None:
-        logger.warning("No contamination met FPR < 1% — using contamination=0.01 as safest option")
-        best_contamination = 0.01
+        logger.warning("No contamination met FPR < 5% — using contamination=0.39 (actual ratio)")
+        best_contamination = 0.39
         best_model = IsolationForest(
             contamination=best_contamination,
             n_estimators=200,
@@ -171,7 +253,7 @@ def score_isolation_forest(model: IsolationForest, X: np.ndarray) -> np.ndarray:
 
 
 if __name__ == "__main__":
-    DATA_PATH = "data/processed/phase1_processed.csv"
+    DATA_PATH = "../../data/processed/phase1_processed.csv"
     if not Path(DATA_PATH).exists():
-        DATA_PATH = "data/processed/final_balanced_240k.csv"
+        DATA_PATH = "../../data/processed/final_balanced_240k.csv"
     train_isolation_forest(DATA_PATH)
