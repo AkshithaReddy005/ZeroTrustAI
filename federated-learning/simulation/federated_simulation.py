@@ -60,29 +60,35 @@ class FederatedSimulation:
             },
             "clients": [
                 {
-                    "client_id": "enterprise_a",
+                    "client_id": "enterprise",
                     "data_type": "enterprise",
                     "data_size": 1000,
                     "attack_ratio": 0.3
                 },
                 {
-                    "client_id": "university_b",
+                    "client_id": "university",
                     "data_type": "university", 
                     "data_size": 800,
                     "attack_ratio": 0.2
                 },
                 {
-                    "client_id": "datacenter_c",
+                    "client_id": "datacenter",
                     "data_type": "datacenter",
                     "data_size": 1200,
                     "attack_ratio": 0.4
+                },
+                {
+                    "client_id": "honey_token",
+                    "data_type": "honey_token",
+                    "data_size": 500,
+                    "attack_ratio": 0.9
                 }
             ],
             "federated": {
                 "rounds": 5,
                 "local_epochs": 3,
                 "min_clients": 2,
-                "aggregation_strategy": "fedavg"
+                "aggregation_strategy": "median"
             },
             "visualization": {
                 "generate_plots": True,
@@ -194,6 +200,11 @@ class FederatedSimulation:
         
         for client in self.config["clients"]:
             logger.info(f"Generating data for client {client['client_id']}")
+
+            data_path = PROJECT_ROOT / "federated-learning" / "client" / "data" / f"client_{client['client_id']}_data.csv"
+            if data_path.exists() and data_path.stat().st_size > 0:
+                logger.info(f"Client data already exists, skipping generation: {data_path}")
+                continue
             
             # Generate synthetic network traffic data
             n_samples = client["data_size"]

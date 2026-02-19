@@ -293,68 +293,94 @@ class FederatedServer:
                             if client.get("status") == "updated" and 
                             client.get("round") == self.round_number)
         return updated_clients >= min_clients
+
+    def _median_aggregate(self, round_updates: Dict) -> Dict[str, torch.Tensor]:
+        """Coordinate-wise median aggregation (Byzantine robust)."""
+        aggregated_state: Dict[str, torch.Tensor] = {}
+
+        first_client = list(round_updates.values())[0]
+        param_names = first_client["update"].keys()
+
+        for param_name in param_names:
+            stacked = torch.stack(
+                [client_data["update"][param_name] for client_data in round_updates.values()],
+                dim=0,
+            )
+            aggregated_state[param_name] = torch.median(stacked, dim=0).values
+
+        return aggregated_state
+
+    def _fedavg_aggregate(self, round_updates: Dict, total_samples: int) -> Dict[str, torch.Tensor]:
+        """Federated Averaging (FedAvg) aggregation."""
+        aggregated_state: Dict[str, torch.Tensor] = {}
+
+        first_client = list(round_updates.values())[0]
+        param_names = first_client["update"].keys()
+
+        for param_name in param_names:
+            weighted_sum = None
+            for client_data in round_updates.values():
+                update = client_data["update"]
+                weight = client_data["num_samples"] / total_samples
+
+                if weighted_sum is None:
+                    weighted_sum = update[param_name] * weight
+                else:
+                    weighted_sum += update[param_name] * weight
+
+            aggregated_state[param_name] = weighted_sum
+
+        return aggregated_state
     
     def _aggregate_updates(self):
-        """Aggregate client updates using FedAvg"""
+        """Aggregate client updates using configured strategy"""
         try:
             logger.info(f"Starting aggregation for round {self.round_number}")
-            
-            # Collect updates from current round
-            round_updates = {}
+
+            round_updates: Dict[str, Dict] = {}
             total_samples = 0
-            
+
             for client_id, client_data in self.client_updates.items():
-                if (client_data.get("status") == "updated" and 
-                    client_data.get("round") == self.round_number):
-                    
-                    update = client_data["model_update"]
-                    num_samples = client_data["num_samples"]
-                    
+                if (
+                    client_data.get("status") == "updated"
+                    and client_data.get("round") == self.round_number
+                ):
+                    update = client_data.get("model_update")
+                    metrics = client_data.get("metrics", {})
+                    num_samples = int(client_data.get("num_samples", 1))
+
+                    if update is None:
+                        continue
+
                     round_updates[client_id] = {
                         "update": update,
-                        "num_samples": num_samples
+                        "num_samples": num_samples,
+                        "metrics": metrics,
                     }
                     total_samples += num_samples
-            
+
             if not round_updates:
                 logger.error("No updates found for aggregation")
                 return
-            
-            # Perform FedAvg aggregation
-            aggregated_state = {}
-            
-            # Get parameter names from first client
-            first_client = list(round_updates.values())[0]
-            param_names = first_client["update"].keys()
-            
-            for param_name in param_names:
-                weighted_sum = None
-                for client_data in round_updates.values():
-                    update = client_data["update"]
-                    weight = client_data["num_samples"] / total_samples
-                    
-                    if weighted_sum is None:
-                        weighted_sum = update[param_name] * weight
-                    else:
-                        weighted_sum += update[param_name] * weight
-                
-                aggregated_state[param_name] = weighted_sum
-            
-            # Update global model
+
+            strategy = str(self.config["federated"].get("aggregation_strategy", "fedavg")).lower()
+
+            if strategy in {"median", "robust_median", "median_filter"}:
+                logger.info("Using Byzantine-robust median aggregation")
+                aggregated_state = self._median_aggregate(round_updates)
+            else:
+                logger.info("Using FedAvg aggregation")
+                aggregated_state = self._fedavg_aggregate(round_updates, total_samples)
+
             self.global_model.load_state_dict(aggregated_state)
-            
-            # Calculate aggregation metrics
-            avg_accuracy = np.mean([
-                client_data["metrics"].get("accuracy", 0) 
-                for client_data in round_updates.values()
-            ])
-            
-            avg_loss = np.mean([
-                client_data["metrics"].get("loss", 0) 
-                for client_data in round_updates.values()
-            ])
-            
-            # Record aggregation
+
+            avg_accuracy = float(
+                np.mean([client_data["metrics"].get("accuracy", 0.0) for client_data in round_updates.values()])
+            )
+            avg_loss = float(
+                np.mean([client_data["metrics"].get("loss", 0.0) for client_data in round_updates.values()])
+            )
+
             aggregation_record = {
                 "round": self.round_number,
                 "timestamp": datetime.now().isoformat(),
@@ -362,28 +388,27 @@ class FederatedServer:
                 "total_samples": total_samples,
                 "avg_accuracy": avg_accuracy,
                 "avg_loss": avg_loss,
-                "client_ids": list(round_updates.keys())
+                "client_ids": list(round_updates.keys()),
+                "strategy": strategy,
             }
-            
+
             self.aggregation_history.append(aggregation_record)
-            
-            # Save global model
             self._save_global_model()
-            
+
             logger.info(f"Round {self.round_number} aggregation complete:")
             logger.info(f"  - Clients: {len(round_updates)}")
             logger.info(f"  - Samples: {total_samples}")
             logger.info(f"  - Avg Accuracy: {avg_accuracy:.4f}")
             logger.info(f"  - Avg Loss: {avg_loss:.4f}")
-            
-            # Increment round
+            logger.info(f"  - Strategy: {strategy}")
+
+            prev_round = self.round_number
             self.round_number += 1
-            
-            # Reset client statuses for next round
+
             for client_data in self.client_updates.values():
-                if client_data.get("round") == self.round_number - 1:
+                if client_data.get("round") == prev_round:
                     client_data["status"] = "registered"
-            
+
         except Exception as e:
             logger.error(f"Aggregation error: {e}")
     
