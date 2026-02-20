@@ -1,22 +1,12 @@
 #!/usr/bin/env python3
 """
-ZeroTrust-AI Real Data Sender — CORRECT ML ARCHITECTURES
-=========================================================
-Architectures verified from inspect_models.py:
-
-TCN: Sequential Conv1d — input [batch, 1, 40]
-  Conv1d(1,64,3) → ReLU → Dropout
-  Conv1d(64,128,3) → ReLU → Dropout → AvgPool → Flatten
-  Linear(128,64) → ReLU → Linear(64,1) → Sigmoid
-
-AE: Linear encoder/decoder — input [batch, 47]
-  Encoder: 47→128→64→32
-  Decoder: 32→64→128→47
-
-IsoForest: searched across all model subdirectories
-Scaler:    47 features (40 SPLT + 7 volumetric)
-
-Ensemble: tcn*0.50 + ae*0.25 + iso*0.25
+ZeroTrust-AI Real Data Sender
+==============================
+Uses production models from c2_ddos/scripts/models/:
+  - tcn_model.pth       (TCN, F1=0.9637, Accuracy=97%)
+  - autoencoder.pt      (AE anomaly detector)
+  - isolation_forest.pkl
+  - ensemble_config.pkl (weights: TCN=0.9, AE=0.1, IF=0.0, threshold=0.45)
 """
 
 import sys, os, time, random, requests
@@ -25,71 +15,77 @@ import pandas as pd
 import torch
 import torch.nn as nn
 import joblib
+from pathlib import Path
 from datetime import datetime, timezone
 
 WS_SERVER    = "http://localhost:9000"
-MODEL_DIR    = "models"
+# Production models are in c2_ddos/scripts/models/
+REPO_ROOT    = Path(__file__).resolve().parent
+MODEL_DIR    = REPO_ROOT / "c2_ddos" / "scripts" / "models"
 DELAY        = 0.8
 THREAT_RATIO = 0.4
 SEQ_LEN      = 20
-AE_THRESHOLD = 0.95   # from ae_threshold.txt
 
 CSV_CANDIDATES = [
-    r"data\processed\splt_features_labeled.csv",
-    r"data\processed\balanced_train_200k_v2.csv",
-    r"data\processed\balanced_train_400k.csv",
-    r"data\processed\splt_features.csv",
-    r"data\processed\final_balanced_240k.csv",
+    str(REPO_ROOT / "data" / "processed" / "phase1_processed.csv"),
+    str(REPO_ROOT / "data" / "processed" / "final_balanced_240k.csv"),
+    str(REPO_ROOT / "data" / "processed" / "splt_features_labeled.csv"),
+    str(REPO_ROOT / "data" / "processed" / "balanced_train_200k_v2.csv"),
+    str(REPO_ROOT / "data" / "processed" / "balanced_train_400k.csv"),
 ]
 
 
-# ── EXACT MODEL ARCHITECTURES ─────────────────────────────────────────────────
+# ── PRODUCTION MODEL ARCHITECTURES (matching c2_ddos/scripts/train_tcn.py) ────
+
+class CausalConv1d(nn.Module):
+    def __init__(self, in_ch, out_ch, kernel_size, dilation=1):
+        super().__init__()
+        self.pad = (kernel_size - 1) * dilation
+        self.conv = nn.Conv1d(in_ch, out_ch, kernel_size, dilation=dilation, padding=self.pad)
+    def forward(self, x):
+        return self.conv(x)[:, :, :x.size(2)]
+
+class TCNBlock(nn.Module):
+    def __init__(self, in_ch, out_ch, kernel_size, dilation):
+        super().__init__()
+        self.net = nn.Sequential(
+            CausalConv1d(in_ch, out_ch, kernel_size, dilation),
+            nn.BatchNorm1d(out_ch), nn.ReLU(), nn.Dropout(0.1),
+            CausalConv1d(out_ch, out_ch, kernel_size, dilation),
+            nn.BatchNorm1d(out_ch), nn.ReLU(), nn.Dropout(0.1),
+        )
+        self.res = nn.Conv1d(in_ch, out_ch, 1) if in_ch != out_ch else nn.Identity()
+    def forward(self, x):
+        return nn.functional.relu(self.net(x) + self.res(x))
 
 class TCN(nn.Module):
-    """
-    Keys from file:
-      tcn.0  Conv1d(1,64,3)    tcn.3  Conv1d(64,128,3)
-      tcn.8  Linear(128,64)    tcn.10 Linear(64,1)
-    Input: [batch, 1, 40]
-    """
-    def __init__(self):
+    """Production TCN — input [batch, 2, 20] (len + iat channels, 20 steps)"""
+    def __init__(self, channels=[32, 64]):
         super().__init__()
-        self.tcn = nn.Sequential(
-            nn.Conv1d(1, 64, 3, padding=1),    # 0
-            nn.ReLU(),                           # 1
-            nn.Dropout(0.2),                    # 2
-            nn.Conv1d(64, 128, 3, padding=1),   # 3
-            nn.ReLU(),                           # 4
-            nn.Dropout(0.2),                    # 5
-            nn.AdaptiveAvgPool1d(1),            # 6
-            nn.Flatten(),                        # 7
-            nn.Linear(128, 64),                 # 8
-            nn.ReLU(),                           # 9
-            nn.Linear(64, 1),                   # 10
-            nn.Sigmoid(),                        # 11
-        )
+        layers, in_ch = [], 2
+        for i, out_ch in enumerate(channels):
+            layers.append(TCNBlock(in_ch, out_ch, kernel_size=3, dilation=2**i))
+            in_ch = out_ch
+        self.tcn = nn.Sequential(*layers)
+        self.head = nn.Linear(in_ch, 1)
     def forward(self, x):
-        return self.tcn(x)
-
+        out = self.tcn(x)          # [B, C, T]
+        out = out.mean(dim=2)      # [B, C]
+        return self.head(out)      # [B, 1] logits
 
 class Autoencoder(nn.Module):
-    """
-    Keys from file:
-      encoder.0 Linear(47,128)  encoder.3 Linear(128,64)  encoder.6 Linear(64,32)
-      decoder.0 Linear(32,64)   decoder.3 Linear(64,128)  decoder.5 Linear(128,47)
-    Input: [batch, 47]
-    """
-    def __init__(self):
+    """Production AE — input_dim from ae_config.pkl"""
+    def __init__(self, input_dim=40):
         super().__init__()
         self.encoder = nn.Sequential(
-            nn.Linear(47, 128), nn.ReLU(), nn.Dropout(0.2),   # 0,1,2
-            nn.Linear(128, 64), nn.ReLU(), nn.Dropout(0.2),   # 3,4,5
-            nn.Linear(64, 32),                                  # 6
+            nn.Linear(input_dim, 32), nn.ReLU(),
+            nn.Linear(32, 16),        nn.ReLU(),
+            nn.Linear(16, 8),
         )
         self.decoder = nn.Sequential(
-            nn.Linear(32, 64),  nn.ReLU(), nn.Dropout(0.2),   # 0,1,2
-            nn.Linear(64, 128), nn.ReLU(),                      # 3,4
-            nn.Linear(128, 47),                                  # 5
+            nn.Linear(8, 16),         nn.ReLU(),
+            nn.Linear(16, 32),        nn.ReLU(),
+            nn.Linear(32, input_dim),
         )
     def forward(self, x):
         return self.decoder(self.encoder(x))
@@ -97,147 +93,123 @@ class Autoencoder(nn.Module):
 
 # ── MODEL LOADING ─────────────────────────────────────────────────────────────
 
-def find_isoforest():
-    import glob
-    from sklearn.ensemble import IsolationForest
-    paths = glob.glob(os.path.join(MODEL_DIR, "**", "*.joblib"), recursive=True)
-    paths += glob.glob(os.path.join(MODEL_DIR, "*.joblib"))
-    for path in sorted(set(paths)):
-        try:
-            obj = joblib.load(path)
-            if isinstance(obj, IsolationForest):
-                print(f"✅ IsoForest: {path}  (n_features={obj.n_features_in_})")
-                return obj
-        except: continue
-    return None
-
-
-def find_scaler(n_features):
-    import glob
-    paths = glob.glob(os.path.join(MODEL_DIR, "**", "*.joblib"), recursive=True)
-    paths += glob.glob(os.path.join(MODEL_DIR, "*.joblib"))
-    for path in sorted(set(paths)):
-        try:
-            obj = joblib.load(path)
-            n = getattr(obj, "mean_", getattr(obj, "center_", None))
-            if n is not None and len(n) == n_features:
-                print(f"✅ Scaler:    {path}  (features={len(n)})")
-                return obj
-        except: continue
-    return None
-
-
 def load_models():
-    device = torch.device("cpu")
-    m = {}
+    import sys as _sys
+    _sys.path.insert(0, str(REPO_ROOT / "c2_ddos" / "scripts"))
+    from train_tcn import load_tcn_bundle, score_tcn
+    from train_autoencoder import load_autoencoder, score_autoencoder
+    from train_isolation_forest import load_isolation_forest
 
-    # TCN
+    m = {"score_tcn": score_tcn, "score_ae": score_autoencoder}
+
+    # TCN — production model (F1=0.9637, Accuracy=97%)
     try:
-        tcn = TCN()
-        tcn.load_state_dict(torch.load(f"{MODEL_DIR}/tcn_classifier.pth", map_location=device))
-        tcn.eval(); m["tcn"] = tcn
-        print("✅ TCN loaded  → input [batch, 1, 40]")
+        tcn, len_sc, iat_sc = load_tcn_bundle(str(MODEL_DIR))
+        m["tcn"] = tcn
+        m["tcn_len_scaler"] = len_sc
+        m["tcn_iat_scaler"] = iat_sc
+        print("✅ TCN loaded  → tcn_model.pth")
     except Exception as e:
         print(f"❌ TCN: {e}"); m["tcn"] = None
 
     # Autoencoder
     try:
-        ae = Autoencoder()
-        ae.load_state_dict(torch.load(f"{MODEL_DIR}/autoencoder.pth", map_location=device))
-        ae.eval(); m["ae"] = ae; m["ae_thr"] = AE_THRESHOLD
-        print(f"✅ AE loaded   → input [batch, 47]  threshold={AE_THRESHOLD}")
+        ae, ae_sc, ae_thr = load_autoencoder(str(MODEL_DIR))
+        m["ae"] = ae
+        m["ae_scaler"] = ae_sc
+        m["ae_thr"] = ae_thr
+        print(f"✅ AE loaded   → autoencoder.pt  threshold={ae_thr:.3f}")
     except Exception as e:
-        print(f"❌ AE: {e}"); m["ae"] = None; m["ae_thr"] = AE_THRESHOLD
+        print(f"❌ AE: {e}"); m["ae"] = None; m["ae_thr"] = 9.0
 
-    # IsoForest (search all subdirs)
-    iso = find_isoforest()
-    m["iso"] = iso
-    m["iso_nfeat"] = iso.n_features_in_ if iso else 47
-    if iso:
-        m["scaler"] = find_scaler(iso.n_features_in_)
-    else:
-        print("⚠️  IsolationForest not found — run: dir models\\82k_models\\")
-        m["scaler"] = None
+    # Isolation Forest
+    try:
+        iso, iso_feats = load_isolation_forest(str(MODEL_DIR))
+        m["iso"] = iso
+        m["iso_features"] = iso_feats
+        print("✅ IF loaded   → isolation_forest.pkl")
+    except Exception as e:
+        print(f"⚠️  IF: {e}"); m["iso"] = None
 
-    return m, device
+    # Ensemble config
+    try:
+        ens = joblib.load(MODEL_DIR / "ensemble_config.pkl")
+        m["weights"] = ens["weights"]       # {tcn:0.9, ae:0.1, if:0.0}
+        m["threshold"] = ens.get("quarantine_threshold", 0.45)
+        print(f"✅ Ensemble    → weights={m['weights']}  threshold={m['threshold']}")
+    except Exception as e:
+        print(f"⚠️  Ensemble config: {e}")
+        m["weights"] = {"tcn": 0.9, "ae": 0.1, "if": 0.0}
+        m["threshold"] = 0.45
+
+    return m, None  # device not needed (production fns handle it)
 
 
-# ── FEATURE EXTRACTION ────────────────────────────────────────────────────────
+# ── FEATURE EXTRACTION + INFERENCE ───────────────────────────────────────────
 
-def extract_features(row):
+def score_row(row, m, device):
+    """Score a single row using production model APIs."""
     len_cols = [f"splt_len_{i}" for i in range(1, SEQ_LEN+1)]
     iat_cols = [f"splt_iat_{i}" for i in range(1, SEQ_LEN+1)]
     splt_len = np.array([float(row.get(c,0) or 0) for c in len_cols], dtype=np.float32)
     splt_iat = np.array([float(row.get(c,0) or 0) for c in iat_cols], dtype=np.float32)
-    splt_40  = np.concatenate([splt_len, splt_iat])
+    X_40 = np.concatenate([splt_len, splt_iat]).reshape(1, -1)  # [1, 40] for TCN
 
-    dur = max(float(row.get("duration",1.0) or 1.0), 1e-3)
-    pps = float(row.get("total_packets",100) or 100) / dur
-    vol_7 = np.array([
-        float(row.get("total_packets",  100) or 100),
-        float(row.get("total_bytes",  50000) or 50000),
-        float(row.get("avg_packet_size",500) or 500),
-        float(row.get("std_packet_size",100) or 100),
-        dur, pps,
-        float(row.get("avg_entropy",    4.0) or 4.0),
-    ], dtype=np.float32)
+    # AE needs 47 features: 40 SPLT + exact 7 volumetric from train_autoencoder.py
+    # [pps, bps, mean_packet_size, mean_iat, burstiness, pseudo_upload_bytes, pseudo_download_bytes]
+    dur  = max(float(row.get("duration", 1.0) or 1.0), 1e-6)
+    pkts = max(float(row.get("total_packets", 1) or 1), 1.0)
+    byts = float(row.get("total_bytes", 0) or 0)
+    pps  = pkts / dur
+    bps  = byts / dur
+    mean_pkt  = byts / pkts
+    mean_iat  = dur / max(pkts - 1.0, 1.0)
+    burstiness = float(np.std(splt_iat)) if splt_iat.any() else 0.0
+    pseudo_up  = float(splt_len[0::2].sum())   # odd-indexed packets
+    pseudo_dn  = float(splt_len[1::2].sum())   # even-indexed packets
+    vol_7 = np.array([pps, bps, mean_pkt, mean_iat, burstiness, pseudo_up, pseudo_dn], dtype=np.float32)
+    X_47 = np.concatenate([splt_len, splt_iat, vol_7]).reshape(1, -1)  # [1, 47] for AE
 
-    full_47 = np.concatenate([splt_40, vol_7])      # [47] for AE + IsoForest
-    X_tcn   = splt_40.reshape(1, -1)                # [1, 40] for TCN
-    return X_tcn, full_47
+    w = m["weights"]
 
-
-# ── INFERENCE ─────────────────────────────────────────────────────────────────
-
-def score_row(row, m, device):
-    X_tcn, X_47 = extract_features(row)
-
-    # TCN — input [1, 1, 40]
+    # TCN — score_tcn handles PowerTransformer scaling internally
     tcn_s = 0.5
-    if m["tcn"]:
+    if m.get("tcn"):
         try:
-            t = torch.from_numpy(X_tcn).unsqueeze(0).float()
-            with torch.no_grad():
-                tcn_s = float(m["tcn"](t).squeeze().item())
+            scores = m["score_tcn"](
+                m["tcn"], X_40,
+                len_scaler=m["tcn_len_scaler"],
+                iat_scaler=m["tcn_iat_scaler"]
+            )
+            tcn_s = float(scores[0])
         except Exception as e:
             print(f"   TCN error: {e}")
 
-    # AE — input [1, 47]
+    # AE — score_autoencoder handles RobustScaler internally
     ae_s = 0.5
-    if m["ae"]:
+    if m.get("ae"):
         try:
-            t = torch.from_numpy(X_47).unsqueeze(0).float()
-            with torch.no_grad():
-                recon = m["ae"](t)
-                mse = float(((t - recon)**2).mean().item())
-            ae_s = float(np.clip(mse / max(m["ae_thr"], 1e-9), 0.0, 1.0))
+            ae_scores = m["score_ae"](m["ae"], m["ae_scaler"], X_47, m["ae_thr"])
+            ae_s = float(ae_scores[0])
         except Exception as e:
             print(f"   AE error: {e}")
 
-    # IsoForest
+    # IF — weight=0.0 but compute for display
     iso_s = 0.5
-    if m["iso"]:
+    if m.get("iso"):
         try:
-            n   = m["iso_nfeat"]
-            Xi  = np.zeros((1, n), dtype=np.float32)
-            src = X_47 if len(X_47) >= n else np.pad(X_47, (0, n-len(X_47)))
-            Xi[0] = src[:n]
-            Xs = m["scaler"].transform(Xi) if m["scaler"] else Xi
-            raw = float(m["iso"].decision_function(Xs)[0])
+            from train_isolation_forest import get_volumetric_matrix, _derive_missing_volumetric_features
+            Xi = pd.DataFrame([dict(row)])
+            Xi = _derive_missing_volumetric_features(Xi)
+            Xv = get_volumetric_matrix(Xi)
+            raw = float(m["iso"].decision_function(Xv)[0])
             iso_s = float(np.clip(1.0 / (1.0 + np.exp(3.0 * raw)), 0.0, 1.0))
-        except Exception as e:
-            print(f"   IsoForest error: {e}")
+        except Exception:
+            iso_s = 0.5
 
-    # Ensemble
-    n_loaded = sum(1 for k in ["tcn","ae","iso"] if m.get(k))
-    if n_loaded == 3:
-        conf = tcn_s*0.50 + ae_s*0.25 + iso_s*0.25
-    elif n_loaded == 2:
-        vals = [s for s,k in [(tcn_s,"tcn"),(ae_s,"ae"),(iso_s,"iso")] if m.get(k)]
-        conf = sum(vals)/len(vals)
-    else:
-        conf = tcn_s
-    return tcn_s, ae_s, iso_s, float(np.clip(conf,0,1))
+    # Ensemble with calibrated weights (TCN=0.9, AE=0.1, IF=0.0)
+    conf = tcn_s * w["tcn"] + ae_s * w["ae"] + iso_s * w.get("if", 0.0)
+    return tcn_s, ae_s, iso_s, float(np.clip(conf, 0, 1))
 
 
 # ── HELPERS ───────────────────────────────────────────────────────────────────
@@ -288,15 +260,17 @@ def get_attack_type(row):
 
 def build_event(row, at, tcn_s, ae_s, iso_s, conf):
     csv_label = str(row.get("label", "0")).strip()
-    if csv_label in ["1", "malicious", "attack"]:
-        true_label = "malicious"
-        true_attack = at if at not in ("benign","normal") else "malicious"
+    csv_malicious = csv_label in ["1", "malicious", "attack"]
+
+    # CSV ground truth determines label and attack type
+    true_label = "malicious" if csv_malicious else "benign"
+    true_attack = (at if at not in ("benign", "normal") else "malicious") if csv_malicious else "benign"
+
+    # Severity based on ML confidence, but CSV ground truth caps it
+    if csv_malicious:
+        sev = "critical" if conf>=0.90 else "high" if conf>=0.75 else "medium" if conf>=0.55 else "low"
     else:
-        true_label = "benign"
-        true_attack = "benign"
-    
-    is_mal = true_label == "malicious"
-    sev = "critical" if conf>=0.90 else "high" if conf>=0.75 else "medium" if conf>=0.55 else "low"
+        sev = "medium" if conf>=0.75 else "low"
     src = str(row.get("src_ip","") or "").strip()
     dst = str(row.get("dst_ip","") or "").strip()
     if not src or src in ("0.0.0.0","nan",""): src = random.choice(SRC_IPS)
@@ -317,7 +291,7 @@ def build_event(row, at, tcn_s, ae_s, iso_s, conf):
         "confidence":round(conf,4),"risk_score":round(conf,4),"severity":sev,
         "attack_type":true_attack,"source_ip":src,"destination_ip":dst,
         "mitre_tactic":tactic,"mitre_technique":tech,"reason":reasons,
-        "blocked":is_mal and conf>=0.85,"anomaly_score":round(iso_s,4),
+        "blocked":csv_malicious and conf>=0.85,"anomaly_score":round(iso_s,4),
         "timestamp":datetime.now(timezone.utc).isoformat(),
         "total_packets":int(row.get("total_packets",100) or 100),
         "total_bytes":int(row.get("total_bytes",50000) or 50000),

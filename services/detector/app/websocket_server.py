@@ -17,6 +17,7 @@ from datetime import datetime, timedelta
 import random
 from dataclasses import dataclass
 import uvicorn
+from pathlib import Path
 
 app = FastAPI(title="ZeroTrust-AI Real-time SOC")
 
@@ -399,28 +400,31 @@ async def get_attack_stats():
 async def get_web_interface():
     """Serve main web interface"""
     try:
-        with open("c:/Users/shrey/Desktop/techsavishakara/techs/ZeroTrustAI/apps/web/index.html", "r", encoding="utf-8") as f:
-            return f.read()
+        repo_root = Path(__file__).resolve().parents[3]
+        html_path = repo_root / "apps" / "web" / "index.html"
+        return html_path.read_text(encoding="utf-8")
     except FileNotFoundError:
-        return "<h1>Web interface not found. Run from project root.</h1>"
+        return "<h1>Web interface not found. Missing apps/web/index.html</h1>"
 
 @app.get("/soar-dashboard.html", response_class=HTMLResponse)
 async def get_soar_dashboard():
     """Serve SOAR dashboard interface"""
     try:
-        with open("c:/Users/shrey/Desktop/techsavishakara/techs/ZeroTrustAI/apps/web/soar-dashboard.html", "r", encoding="utf-8") as f:
-            return f.read()
+        repo_root = Path(__file__).resolve().parents[3]
+        html_path = repo_root / "apps" / "web" / "soar-dashboard.html"
+        return html_path.read_text(encoding="utf-8")
     except FileNotFoundError:
-        return "<h1>SOAR dashboard not found.</h1>"
+        return "<h1>SOAR dashboard not found. Missing apps/web/soar-dashboard.html</h1>"
 
 @app.get("/soar-command-center.html", response_class=HTMLResponse)
 async def get_soar_command_center():
     """Serve SOAR Command Center interface"""
     try:
-        with open("c:/Users/shrey/Desktop/techsavishakara/techs/ZeroTrustAI/apps/web/soar-command-center.html", "r", encoding="utf-8") as f:
-            return f.read()
+        repo_root = Path(__file__).resolve().parents[3]
+        html_path = repo_root / "apps" / "web" / "soar-command-center.html"
+        return html_path.read_text(encoding="utf-8")
     except FileNotFoundError:
-        return "<h1>SOAR Command Center not found.</h1>"
+        return "<h1>SOAR Command Center not found. Missing apps/web/soar-command-center.html</h1>"
 
 # Simulation endpoint for testing
 @app.post("/simulate-threats")
