@@ -86,26 +86,29 @@
       let is_threat = false;
       let is_malicious = false;
 
-      if (baseRisk < 0.5) {
+      // Use real ML threshold: 0.45 (from ensemble_config.pkl)
+      const predictedMalicious = baseRisk >= 0.45;
+
+      if (!predictedMalicious) {
+        // Benign flows - never HIGH severity
         risk_band = 'benign';
-        display_severity = 'low';
+        display_severity = baseRisk < 0.3 ? 'low' : 'medium';
         is_threat = false;
         is_malicious = false;
-      } else if (baseRisk < 0.7) {
-        risk_band = 'low';
-        display_severity = 'low';
-        is_threat = true;
-        is_malicious = false;
-      } else if (baseRisk < 0.85) {
-        risk_band = 'suspicious';
-        display_severity = 'medium';
-        is_threat = true;
-        is_malicious = false;
       } else {
-        risk_band = 'malicious';
-        display_severity = 'high';
+        // Malicious flows - ALWAYS at least MEDIUM severity
         is_threat = true;
         is_malicious = true;
+        if (baseRisk < 0.75) {
+          risk_band = 'suspicious';
+          display_severity = 'medium';  // MINIMUM for malicious
+        } else if (baseRisk < 0.90) {
+          risk_band = 'malicious';
+          display_severity = 'high';
+        } else {
+          risk_band = 'malicious';
+          display_severity = 'critical';
+        }
       }
 
       const reasons = raw.reason || [];
@@ -314,12 +317,27 @@
         }
       });
 
-      let observed_accuracy = null;
-      if (maliciousEvents.length > 0) {
-        const blockedCount = maliciousEvents.filter(e => e.blocked).length;
-        const raw = blockedCount / maliciousEvents.length;
-        observed_accuracy = 0.9 + 0.07 * Math.max(0, Math.min(1, raw));
-      }
+      // Confusion matrix: label (ground truth) vs ML prediction (0.45 threshold)
+      let tp = 0, tn = 0, fp = 0, fn = 0;
+      events.forEach(e => {
+        const ts = new Date(e.timestamp || Date.now()).getTime();
+        if (!Number.isFinite(ts) || now - ts > windowMs) return;
+        const actual_mal = (e.label || '').toLowerCase() === 'malicious';
+        // Use same 0.45 threshold as normalizeEvent for consistency
+        const risk_score = typeof e.risk_score === 'number' ? e.risk_score : 
+                          (typeof e.confidence === 'number' ? e.confidence : 0);
+        const pred_mal = risk_score >= 0.45;
+        if (actual_mal && pred_mal)        tp++;
+        else if (!actual_mal && !pred_mal) tn++;
+        else if (!actual_mal && pred_mal)  fp++;
+        else                               fn++;
+      });
+      const cm_total = tp + tn + fp + fn || 1;
+      const observed_accuracy = (tp + tn) / cm_total;
+      const cm_precision = tp + fp > 0 ? tp / (tp + fp) : 0;
+      const cm_recall    = tp + fn > 0 ? tp / (tp + fn) : 0;
+      const cm_f1        = cm_precision + cm_recall > 0 ? 2 * cm_precision * cm_recall / (cm_precision + cm_recall) : 0;
+      const confusion_matrix = { tp, tn, fp, fn, precision: cm_precision, recall: cm_recall, f1: cm_f1, accuracy: observed_accuracy };
 
       const toTopArray = (obj, keyName) => Object.entries(obj)
         .sort((a, b) => b[1] - a[1])
@@ -345,6 +363,7 @@
         threat_flows,
         blocked_flows,
         observed_accuracy,
+        confusion_matrix,
         severity_counts,
         attack_types,
         timeline_points,
@@ -421,7 +440,10 @@
       const sev = (severity || 'low').toLowerCase();
       let label = 'LOW';
       let color = 'text-green-400 bg-green-900/30';
-      if (sev === 'high') {
+      if (sev === 'critical') {
+        label = 'CRITICAL';
+        color = 'text-red-600 bg-red-900/50 border border-red-500';
+      } else if (sev === 'high') {
         label = 'HIGH';
         color = 'text-red-400 bg-red-900/30';
       } else if (sev === 'medium') {
@@ -507,8 +529,12 @@
                     <div className="text-xs text-gray-400 truncate max-w-xs">Flow: {t.flow_id}</div>
                   </div>
                   <div className="mt-2 grid grid-cols-2 md:grid-cols-4 gap-2 text-sm">
-                    <div><span className="text-gray-400">Label:</span> <span className="font-semibold">{t.label || 'unknown'}</span></div>
-                    <div><span className="text-gray-400">Confidence:</span> {Math.round(((t.confidence != null ? t.confidence : t.risk_score || 0) || 0) * 100)}%</div>
+                    <div>
+                      <span className="text-gray-400">GT:</span> <span className="font-semibold">{t.label || 'unknown'}</span>
+                      <span className="text-gray-400"> {' | Pred:'} </span>
+                      <span className="font-semibold">{t.is_malicious ? 'malicious' : 'benign'}</span>
+                    </div>
+                    <div><span className="text-gray-400">Risk Score:</span> {Math.round(((t.risk_score || 0) || 0) * 100)}%</div>
                     <div><span className="text-gray-400">Attack:</span> {t.attack_type || '—'}</div>
                     <div><span className="text-gray-400">Blocked:</span> {t.blocked ? 'Yes' : 'No'}</div>
                   </div>
@@ -589,6 +615,54 @@
         });
       }, [severityCounts]);
       return <canvas ref={canvasRef} height="200" />;
+    };
+
+    const ConfusionMatrix = ({ confusionMatrix }) => {
+      const { tp, tn, fp, fn, precision, recall, f1, accuracy } = confusionMatrix || {};
+      
+      return (
+        <div className="space-y-3">
+          {/* Matrix Grid */}
+          <div className="grid grid-cols-2 gap-2 text-center">
+            <div className="bg-green-900/30 border border-green-600 rounded p-2">
+              <div className="text-green-400 font-bold">TP: {tp || 0}</div>
+              <div className="text-xs text-gray-400">True Positive</div>
+            </div>
+            <div className="bg-red-900/30 border border-red-600 rounded p-2">
+              <div className="text-red-400 font-bold">FP: {fp || 0}</div>
+              <div className="text-xs text-gray-400">False Positive</div>
+            </div>
+            <div className="bg-orange-900/30 border border-orange-600 rounded p-2">
+              <div className="text-orange-400 font-bold">FN: {fn || 0}</div>
+              <div className="text-xs text-gray-400">False Negative</div>
+            </div>
+            <div className="bg-blue-900/30 border border-blue-600 rounded p-2">
+              <div className="text-blue-400 font-bold">TN: {tn || 0}</div>
+              <div className="text-xs text-gray-400">True Negative</div>
+            </div>
+          </div>
+          
+          {/* Metrics */}
+          <div className="grid grid-cols-2 gap-2 text-xs">
+            <div className="text-center">
+              <div className="text-gray-400">Accuracy</div>
+              <div className="font-bold text-green-400">{((accuracy || 0) * 100).toFixed(1)}%</div>
+            </div>
+            <div className="text-center">
+              <div className="text-gray-400">Precision</div>
+              <div className="font-bold text-blue-400">{((precision || 0) * 100).toFixed(1)}%</div>
+            </div>
+            <div className="text-center">
+              <div className="text-gray-400">Recall</div>
+              <div className="font-bold text-yellow-400">{((recall || 0) * 100).toFixed(1)}%</div>
+            </div>
+            <div className="text-center">
+              <div className="text-gray-400">F1 Score</div>
+              <div className="font-bold text-purple-400">{((f1 || 0) * 100).toFixed(1)}%</div>
+            </div>
+          </div>
+        </div>
+      );
     };
 
     const AttackTypes = ({ attackTypes }) => {
@@ -875,15 +949,12 @@
                 <AttackTypes attackTypes={aggregates.attack_types} />
               </div>
               <div className="lg:col-span-1">
-                <TrafficComposition protocolCounts={aggregates.protocol_counts} />
+                <ChartCard title="Confusion Matrix">
+                  <ConfusionMatrix confusionMatrix={aggregates.confusion_matrix} />
+                </ChartCard>
               </div>
-              <div className="lg:col-span-1 bg-gray-800 rounded-lg border border-gray-700 p-4">
-                <h3 className="text-lg font-semibold mb-3 flex items-center">
-                  <i className="fas fa-server text-purple-500 mr-2"></i>System Health
-                </h3>
-                <p className="text-sm text-gray-300">
-                  Active Connections: {systemMetrics?.active_connections ?? 0}
-                </p>
+              <div className="lg:col-span-1">
+                <TrafficComposition protocolCounts={aggregates.protocol_counts} />
               </div>
             </div>
             <SoarActionsPanel actions={aggregates.soar_actions} />
