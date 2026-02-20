@@ -52,6 +52,120 @@ class ByzantineFederatedDemo:
         self.clients = {}
         self.global_model = None
         self.results = {"fedavg": [], "fedmedian": []}
+        self.input_size = None
+
+    def _persist_history(self, aggregation_method: str, history: list[float]):
+        results_dir = PROJECT_ROOT / "federated-learning" / "results"
+        results_dir.mkdir(parents=True, exist_ok=True)
+        out_csv = results_dir / "byzantine_defense_history.csv"
+
+        rounds = list(range(len(history)))
+        col_map = {
+            "fedavg": "fedavg_hospital_f1",
+            "fedmedian": "fedmedian_hospital_f1",
+        }
+        if aggregation_method not in col_map:
+            return
+
+        def _coalesce_col(df: pd.DataFrame, canonical: str) -> pd.Series:
+            candidates = [canonical, f"{canonical}_x", f"{canonical}_y"]
+            out = None
+            for c in candidates:
+                if c in df.columns:
+                    s = pd.to_numeric(df[c], errors="coerce")
+                    out = s if out is None else out.combine_first(s)
+            if out is None:
+                out = pd.Series(dtype=float)
+            return out
+
+        # Load existing
+        if out_csv.exists():
+            try:
+                df_old = pd.read_csv(out_csv)
+            except Exception:
+                df_old = pd.DataFrame()
+        else:
+            df_old = pd.DataFrame()
+
+        # Canonicalize old to clean schema
+        if "round" not in df_old.columns:
+            df_old = pd.DataFrame({"round": []})
+        df_old["round"] = pd.to_numeric(df_old["round"], errors="coerce")
+        df_old = df_old.dropna(subset=["round"]).copy()
+        df_old["round"] = df_old["round"].astype(int)
+
+        df_old_clean = pd.DataFrame({"round": df_old["round"]})
+        df_old_clean["fedavg_hospital_f1"] = _coalesce_col(df_old, "fedavg_hospital_f1")
+        df_old_clean["fedmedian_hospital_f1"] = _coalesce_col(df_old, "fedmedian_hospital_f1")
+        df_old_clean = df_old_clean.drop_duplicates(subset=["round"], keep="last")
+
+        # Build new updates
+        update_col = col_map[aggregation_method]
+        df_update = pd.DataFrame({"round": rounds, update_col: history})
+        df_update["round"] = pd.to_numeric(df_update["round"], errors="coerce").astype(int)
+        df_update[update_col] = pd.to_numeric(df_update[update_col], errors="coerce")
+
+        # Union rounds and overlay updates
+        df = pd.merge(df_old_clean, df_update, on="round", how="outer", suffixes=("", "_new"))
+        if f"{update_col}_new" in df.columns:
+            df[update_col] = pd.to_numeric(df[update_col], errors="coerce").combine_first(
+                pd.to_numeric(df[f"{update_col}_new"], errors="coerce")
+            )
+            df = df.drop(columns=[f"{update_col}_new"])
+
+        df = df.sort_values("round").reset_index(drop=True)
+        df[["round", "fedavg_hospital_f1", "fedmedian_hospital_f1"]].to_csv(out_csv, index=False)
+
+    def _persist_round_metrics(
+        self,
+        aggregation_method: str,
+        round_num: int,
+        client_losses: dict,
+        client_f1s: dict,
+        global_f1: float,
+    ):
+        results_dir = PROJECT_ROOT / "federated-learning" / "results"
+        results_dir.mkdir(parents=True, exist_ok=True)
+        out_csv = results_dir / "byzantine_round_metrics.csv"
+
+        row = {
+            "method": aggregation_method,
+            "round": int(round_num),
+            "bank_loss": client_losses.get("bank"),
+            "bank_f1": client_f1s.get("bank"),
+            "hospital_loss": client_losses.get("hospital"),
+            "hospital_f1": client_f1s.get("hospital"),
+            "tech_loss": client_losses.get("tech"),
+            "tech_f1": client_f1s.get("tech"),
+            "malicious_loss": client_losses.get("malicious"),
+            "malicious_f1": client_f1s.get("malicious"),
+            "global_f1_hospital": global_f1,
+        }
+        df_new = pd.DataFrame([row])
+
+        if out_csv.exists():
+            try:
+                df_old = pd.read_csv(out_csv)
+            except Exception:
+                df_old = pd.DataFrame()
+        else:
+            df_old = pd.DataFrame()
+
+        if df_old.empty:
+            df = df_new
+        else:
+            if "method" not in df_old.columns:
+                df_old["method"] = ""
+            if "round" not in df_old.columns:
+                df_old["round"] = np.nan
+            df_old["round"] = pd.to_numeric(df_old["round"], errors="coerce")
+            df_old = df_old.dropna(subset=["round"]).copy()
+            df_old["round"] = df_old["round"].astype(int)
+            df = pd.concat([df_old, df_new], ignore_index=True)
+            df = df.drop_duplicates(subset=["method", "round"], keep="last")
+
+        df = df.sort_values(["method", "round"]).reset_index(drop=True)
+        df.to_csv(out_csv, index=False)
         
     def load_client_data(self):
         """Load Non-IID client data"""
@@ -69,8 +183,15 @@ class ByzantineFederatedDemo:
             
             df = pd.read_csv(data_dir / config["file"])
             
-            # Extract features (all columns except label and metadata)
-            feature_cols = [col for col in df.columns if col not in ['label', 'Attack_Type', 'flow_id']]
+            # Extract features (only numeric columns except label and metadata)
+            exclude_cols = {'label', 'Attack_Type', 'flow_id', 'Label', 'src_ip', 'dst_ip', 'src_port', 'dst_port', 'protocol'}
+            numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+            feature_cols = [col for col in numeric_cols if col not in exclude_cols]
+            
+            # Set input size from first client
+            if self.input_size is None:
+                self.input_size = len(feature_cols)
+                
             X = df[feature_cols].fillna(0).values
             y = df['label'].values
             
@@ -161,13 +282,21 @@ class ByzantineFederatedDemo:
         logger.info(f"\n🚀 Starting {aggregation_method.upper()} Simulation")
         
         # Initialize global model
-        self.global_model = TCN().to(self.device)
+        self.global_model = TCN(input_size=self.input_size).to(self.device)
         global_f1_history = []
         
         # Store initial performance
         initial_f1 = self.evaluate(self.global_model, self.clients["hospital"]["test_loader"], "Global")
         logger.info(f"Round 0 - Global F1 (Hospital): {initial_f1:.4f}")
         global_f1_history.append(initial_f1)
+        self._persist_history(aggregation_method, global_f1_history)
+        self._persist_round_metrics(
+            aggregation_method=aggregation_method,
+            round_num=0,
+            client_losses={},
+            client_f1s={},
+            global_f1=initial_f1,
+        )
         
         for round_num in range(1, rounds + 1):
             logger.info(f"\n--- Round {round_num} ---")
@@ -175,14 +304,16 @@ class ByzantineFederatedDemo:
             # Collect client weights
             client_weights = []
             client_f1_scores = {}
+            client_losses = {}
             
             for client_id, client_data in self.clients.items():
                 # Create local model copy
-                local_model = TCN().to(self.device)
+                local_model = TCN(input_size=self.input_size).to(self.device)
                 local_model.load_state_dict(self.global_model.state_dict())
                 
                 # Train locally
                 loss = self.train_local(local_model, client_data["train_loader"])
+                client_losses[client_id] = loss
                 
                 # Evaluate locally
                 f1 = self.evaluate(local_model, client_data["test_loader"], client_id)
@@ -207,6 +338,14 @@ class ByzantineFederatedDemo:
             global_f1_history.append(global_f1)
             
             logger.info(f"  Global F1 on Hospital: {global_f1:.4f}")
+            self._persist_history(aggregation_method, global_f1_history)
+            self._persist_round_metrics(
+                aggregation_method=aggregation_method,
+                round_num=round_num,
+                client_losses=client_losses,
+                client_f1s=client_f1_scores,
+                global_f1=global_f1,
+            )
         
         self.results[aggregation_method] = global_f1_history
         return global_f1_history
@@ -245,7 +384,7 @@ class ByzantineFederatedDemo:
         plt.savefig(plot_path, dpi=300, bbox_inches='tight')
         logger.info(f"📊 Comparison plot saved: {plot_path}")
         
-        plt.show()
+        plt.close()
     
     def print_summary(self):
         """Print demo summary for jury presentation"""
@@ -280,8 +419,19 @@ def main():
     demo.load_client_data()
     
     # Run both aggregation methods
-    demo.run_federated_rounds("fedavg", rounds=5)
-    demo.run_federated_rounds("fedmedian", rounds=5)
+    fedavg_hist = demo.run_federated_rounds("fedavg", rounds=5)
+    fedmedian_hist = demo.run_federated_rounds("fedmedian", rounds=5)
+
+    results_dir = PROJECT_ROOT / "federated-learning" / "results"
+    results_dir.mkdir(parents=True, exist_ok=True)
+    out_csv = results_dir / "byzantine_defense_history.csv"
+    pd.DataFrame(
+        {
+            "round": list(range(len(fedavg_hist))),
+            "fedavg_hospital_f1": fedavg_hist,
+            "fedmedian_hospital_f1": fedmedian_hist,
+        }
+    ).to_csv(out_csv, index=False)
     
     # Create visualization
     demo.create_comparison_plot()
