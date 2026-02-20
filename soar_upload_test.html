@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>SOAR Dashboard Upload Test</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
+</head>
+<body class="bg-gray-900 text-white p-8">
+    <h1 class="text-2xl font-bold mb-4">SOAR Dashboard Upload Test (Same as Dashboard)</h1>
+    
+    <div class="space-y-6 max-w-3xl mx-auto">
+        <div class="bg-gray-800 border border-gray-700 rounded-xl p-6">
+            <h2 class="text-xl font-semibold mb-4 flex items-center gap-2">
+                <i class="fas fa-upload text-blue-400"></i>
+                Upload Suspicious File
+            </h2>
+            <label for="fileInput" class="block cursor-pointer border-2 border-dashed border-gray-600 hover:border-blue-500 rounded-xl p-8 text-center transition-colors">
+                <input type="file" id="fileInput" class="hidden" onchange="fileSelected(event)" />
+                <i class="fas fa-cloud-upload-alt text-5xl text-blue-400 mb-3"></i>
+                <p class="text-lg">Click to select or drag & drop</p>
+                <p class="text-sm text-gray-500 mt-1">EXE, DLL, PDF, DOC, and more</p>
+                <p id="fileInfo" class="mt-3 text-sm text-blue-400 font-mono"></p>
+            </label>
+            <button onclick="handleUpload()" id="uploadBtn" disabled
+                class="mt-4 bg-blue-600 hover:bg-blue-500 disabled:bg-gray-700 disabled:cursor-not-allowed px-6 py-2.5 rounded-lg font-medium transition-colors flex items-center gap-2">
+                <i class="fas fa-play"></i>
+                <span id="btnText">Analyze File</span>
+            </button>
+            <div id="error" class="mt-4 p-3 bg-red-900/50 border border-red-700 rounded-lg text-red-300 text-sm hidden">
+                <i class="fas fa-exclamation-triangle mr-2"></i>
+                <span id="errorText"></span>
+            </div>
+        </div>
+
+        <div id="result" class="space-y-4 hidden">
+            <!-- Results will appear here -->
+        </div>
+    </div>
+
+    <script>
+        let file = null;
+        let analyzing = false;
+
+        function fileSelected(event) {
+            file = event.target.files[0];
+            const fileInfo = document.getElementById('fileInfo');
+            const uploadBtn = document.getElementById('uploadBtn');
+            
+            if (file) {
+                fileInfo.textContent = `${file.name} (${(file.size/1024).toFixed(1)} KB)`;
+                uploadBtn.disabled = false;
+            } else {
+                fileInfo.textContent = '';
+                uploadBtn.disabled = true;
+            }
+        }
+
+        async function handleUpload() {
+            if (!file) { alert('Please select a file first'); return; }
+            
+            analyzing = true;
+            const uploadBtn = document.getElementById('uploadBtn');
+            const btnText = document.getElementById('btnText');
+            const error = document.getElementById('error');
+            const errorText = document.getElementById('errorText');
+            
+            uploadBtn.disabled = true;
+            btnText.textContent = 'Analyzing...';
+            error.classList.add('hidden');
+            
+            const formData = new FormData();
+            formData.append('file', file);
+            
+            try {
+                console.log('Sending request to: http://localhost:8001/analyze');
+                
+                const response = await fetch('http://localhost:8001/analyze', { 
+                    method: 'POST', 
+                    body: formData 
+                });
+                
+                console.log('Response status:', response.status);
+                
+                if (!response.ok) {
+                    throw new Error(`Server error: ${response.status}`);
+                }
+                
+                const result = await response.json();
+                console.log('Analysis result:', result);
+                displayResults(result);
+                
+            } catch (e) {
+                console.error('Upload error:', e);
+                errorText.textContent = e.message || 'Analysis failed. Is the sandbox server running on port 8001?';
+                error.classList.remove('hidden');
+            } finally {
+                analyzing = false;
+                uploadBtn.disabled = false;
+                btnText.textContent = 'Analyze File';
+            }
+        }
+
+        function displayResults(result) {
+            const resultDiv = document.getElementById('result');
+            resultDiv.classList.remove('hidden');
+            
+            const verdictColor = result.sandbox_analysis?.verdict === 'MALICIOUS' ? 'text-red-400' : 
+                               result.sandbox_analysis?.verdict === 'SUSPICIOUS' ? 'text-yellow-400' : 'text-green-400';
+            
+            resultDiv.innerHTML = `
+                <div class="bg-gray-800 border border-gray-700 rounded-xl p-6">
+                    <h3 class="text-lg font-semibold mb-4 flex items-center gap-2">
+                        <i class="fas fa-search text-yellow-400"></i>Static Analysis
+                    </h3>
+                    <div class="grid grid-cols-2 gap-3 text-sm mb-4">
+                        <div class="bg-gray-900 rounded-lg p-3">
+                            <span class="text-gray-400 block text-xs mb-1">File Type</span>
+                            <span class="text-gray-100">${result.static_analysis?.file_info?.file_type || 'Unknown'}</span>
+                        </div>
+                        <div class="bg-gray-900 rounded-lg p-3">
+                            <span class="text-gray-400 block text-xs mb-1">File Size</span>
+                            <span class="text-gray-100">${result.static_analysis?.file_info?.file_size || 0} bytes</span>
+                        </div>
+                        <div class="bg-gray-900 rounded-lg p-3">
+                            <span class="text-gray-400 block text-xs mb-1">Entropy</span>
+                            <span class="${result.static_analysis?.entropy > 7.5 ? 'text-red-400 font-semibold' : 'text-gray-100'}">
+                                ${result.static_analysis?.entropy?.toFixed(2) || '0.00'}
+                            </span>
+                        </div>
+                        <div class="bg-gray-900 rounded-lg p-3">
+                            <span class="text-gray-400 block text-xs mb-1">Packed</span>
+                            <span class="${result.static_analysis?.packed ? 'text-red-400 font-semibold' : 'text-gray-100'}">
+                                ${result.static_analysis?.packed ? 'YES' : 'NO'}
+                            </span>
+                        </div>
+                    </div>
+                    <div>
+                        <span class="text-gray-400 text-sm">Suspicious Strings:</span>
+                        <div class="mt-2 flex flex-wrap gap-2">
+                            ${(result.static_analysis?.suspicious_strings || []).length === 0
+                                ? '<span class="text-green-400 text-sm">None detected</span>'
+                                : (result.static_analysis.suspicious_strings).map((s, i) =>
+                                    `<span key=${i} class="bg-red-800 text-red-200 px-2 py-1 rounded text-xs font-mono">${s}</span>`
+                                ).join('')
+                            }
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="bg-gray-800 border rounded-xl p-6">
+                    <h3 class="text-lg font-semibold mb-4 text-center flex items-center justify-center gap-2">
+                        <i class="fas fa-file-alt"></i>Analysis Report
+                    </h3>
+                    <div class="flex flex-col items-center gap-4">
+                        <div class="text-center">
+                            <div class="text-gray-400 text-sm mb-1">Final Risk Score</div>
+                            <div class="text-4xl font-black ${verdictColor}">
+                                ${result.sandbox_analysis?.risk_score || 0}<span class="text-xl">/100</span>
+                            </div>
+                        </div>
+                        <div class="text-center">
+                            <div class="text-gray-400 text-sm mb-1">Verdict</div>
+                            <div class="text-2xl font-bold ${verdictColor}">
+                                ${result.sandbox_analysis?.verdict || 'UNKNOWN'}
+                            </div>
+                        </div>
+                        <div class="text-center">
+                            <div class="text-gray-400 text-sm mb-1">Action Taken</div>
+                            <div class="text-xl font-bold text-blue-400">${result.sandbox_analysis?.action || 'NO ACTION'}</div>
+                        </div>
+                    </div>
+                </div>
+            `;
+        }
+    </script>
+</body>
+</html>

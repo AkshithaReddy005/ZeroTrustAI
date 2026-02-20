@@ -13,125 +13,195 @@
   <style>
     @keyframes pulse-red {
       0%, 100% { background-color: rgba(239, 68, 68, .1); }
-      50% { background-color: rgba(239, 68, 68, .2); }
+      50% { background-color: rgba(239, 68, 68, .25); }
     }
     @keyframes pulse-green {
-      0%, 100% { background-color: rgba(34, 197, 94, .1); }
-      50% { background-color: rgba(34, 197, 94, .2); }
+      0%, 100% { background-color: rgba(34, 197, 94, .08); }
+      50% { background-color: rgba(34, 197, 94, .18); }
     }
     .threat-high { animation: pulse-red 2s infinite; }
     .soar-active { animation: pulse-green 2s infinite; }
     .cyber-grid {
-      background-image: linear-gradient(rgba(168, 85, 247, .08) 1px, transparent 1px), 
-                        linear-gradient(90deg, rgba(168, 85, 247, .08) 1px, transparent 1px);
+      background-image:
+        linear-gradient(rgba(168, 85, 247, .07) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(168, 85, 247, .07) 1px, transparent 1px);
       background-size: 50px 50px;
     }
-    .timeline-line {
-      background: linear-gradient(180deg, #8b5cf6 0%, #3b82f6 100%);
-      width: 2px;
-      position: absolute;
-      left: 20px;
-      top: 0;
-      bottom: 0;
+    .timeline-dot {
+      width: 10px; height: 10px;
+      border-radius: 50%;
+      flex-shrink: 0;
+      margin-top: 5px;
     }
+    ::-webkit-scrollbar { width: 6px; }
+    ::-webkit-scrollbar-track { background: #1f2937; }
+    ::-webkit-scrollbar-thumb { background: #6b21a8; border-radius: 3px; }
   </style>
 </head>
 <body class="bg-gray-900 text-white cyber-grid">
   <div id="root"></div>
+
   <script type="text/babel">
-    const { useEffect, useState, useRef, useMemo } = React;
-    const API_BASE = 'http://localhost:9000';
+    const { useEffect, useState, useRef, useMemo, useCallback } = React;
     const WS_URL = 'ws://localhost:9000/ws';
 
-    const Header = ({ connected, threatsCount, actionsCount }) => (
-      <header className="bg-gray-800 border-b border-purple-500 px-6 py-4">
-        <div className="container mx-auto flex justify-between items-center">
-          <div className="flex items-center space-x-4">
-            <i className="fas fa-robot text-purple-500 text-2xl"></i>
-            <h1 className="text-2xl font-bold">SOAR Command Center</h1>
-            <a href="http://localhost:9000" className="text-sm text-blue-400 hover:text-blue-300">
-              <i className="fas fa-arrow-left mr-1"></i> Back to SOC
+    /* ─── Helpers ─────────────────────────────────────────── */
+    const severityColor = (s) => ({
+      critical: 'border-red-500 threat-high',
+      high:     'border-orange-500',
+      medium:   'border-yellow-500',
+      low:      'border-blue-500'
+    }[s] || 'border-gray-600');
+
+    const severityBadge = (s) => ({
+      critical: 'bg-red-600',
+      high:     'bg-orange-600',
+      medium:   'bg-yellow-600',
+      low:      'bg-blue-600'
+    }[s] || 'bg-gray-600');
+
+    const actionBadge = (a) => ({
+      BLOCK:      'bg-red-600',
+      RATE_LIMIT: 'bg-orange-600',
+      ISOLATE:    'bg-purple-600',
+      MONITOR:    'bg-blue-600'
+    }[a] || 'bg-gray-600');
+
+    function buildSOARAction(threat, isManual = false, manualType = null) {
+      const conf  = threat.confidence || 0;
+      const reasons = Array.isArray(threat.reason) ? threat.reason : [];
+      const volumetric = reasons.some(r =>
+        ['high_packets_per_second','syn_flood','ddos','flood','port_sweep'].includes(
+          (r || '').toLowerCase()
+        )
+      );
+
+      let action, severity;
+      if (!isManual) {
+        if (conf >= 0.90 || (conf >= 0.85 && volumetric)) {
+          action = 'BLOCK'; severity = 'critical';
+        } else if (conf >= 0.70 && volumetric) {
+          action = 'RATE_LIMIT'; severity = 'high';
+        } else if (conf >= 0.75) {
+          action = 'RATE_LIMIT'; severity = 'medium';
+        } else {
+          action = 'MONITOR'; severity = 'low';
+        }
+      } else {
+        action = manualType.toUpperCase();
+        severity = conf >= 0.85 ? 'critical' : conf >= 0.70 ? 'high' : 'medium';
+      }
+
+      const reasonStr = reasons.length
+        ? `${isManual ? 'Manual – ' : ''}${reasons.slice(0,3).join(', ')}`
+        : `${isManual ? 'Manual operator action' : `Confidence: ${(conf * 100).toFixed(1)}%`}`;
+
+      return {
+        id:             Date.now() + Math.random(),
+        timestamp:      new Date().toISOString(),
+        flowId:         threat.flow_id,
+        target:         threat.source_ip || threat.flow_id || 'unknown',
+        attackType:     threat.attack_type,
+        confidence:     conf,
+        action,
+        severity,
+        automatic:      !isManual,
+        manual:         isManual,
+        processingTime: Math.floor(Math.random() * 450) + 200,
+        reason:         reasonStr,
+        status:         'success'
+      };
+    }
+
+    /* ─── Header ──────────────────────────────────────────── */
+    const Header = ({ connected, threatsCount, actionsCount, activeTab, setActiveTab }) => (
+      <header className="bg-gray-800 border-b border-purple-700 px-6 py-4">
+        <div className="flex justify-between items-center mb-3">
+          <div className="flex items-center gap-3">
+            <i className="fas fa-robot text-purple-400 text-2xl"></i>
+            <h1 className="text-2xl font-bold bg-gradient-to-r from-purple-400 to-blue-400 bg-clip-text text-transparent">
+              SOAR Command Center
+            </h1>
+            <a href="/" className="text-sm text-gray-400 hover:text-white ml-4">
+              <i className="fas fa-arrow-left mr-1"></i>Back to SOC
             </a>
           </div>
-          <div className="flex items-center space-x-6">
-            <div className="flex items-center space-x-4">
-              <div className="text-center">
-                <div className="text-lg font-bold text-red-400">{threatsCount}</div>
-                <div className="text-xs text-gray-400">Threats</div>
-              </div>
-              <div className="text-center">
-                <div className="text-lg font-bold text-green-400">{actionsCount}</div>
-                <div className="text-xs text-gray-400">Actions</div>
-              </div>
+          <div className="flex items-center gap-6 text-sm">
+            <div className="text-center">
+              <div className="text-xl font-bold text-blue-400">{threatsCount}</div>
+              <div className="text-gray-400 text-xs">Threats</div>
             </div>
-            <span className="flex items-center">
-              <span className={`w-3 h-3 ${connected ? 'bg-green-500' : 'bg-red-500'} rounded-full mr-2 animate-pulse`}></span>
-              <span className="text-sm">{connected ? 'Connected' : 'Disconnected'}</span>
-            </span>
-            <span className="text-sm text-gray-400">{new Date().toLocaleString()}</span>
+            <div className="text-center">
+              <div className="text-xl font-bold text-green-400">{actionsCount}</div>
+              <div className="text-gray-400 text-xs">Actions</div>
+            </div>
+            <div className="flex items-center gap-2">
+              <span className={`w-2.5 h-2.5 rounded-full ${connected ? 'bg-green-400' : 'bg-red-500'}`}></span>
+              <span className={connected ? 'text-green-400' : 'text-red-400'}>
+                {connected ? 'Connected' : 'Disconnected'}
+              </span>
+            </div>
+            <span className="text-gray-500 text-xs">{new Date().toLocaleString()}</span>
           </div>
+        </div>
+        <div className="flex gap-1">
+          {[['threats','shield-virus','Threat Response'],['sandbox','vial','Sandbox Analysis']].map(([id, icon, label]) => (
+            <button key={id} onClick={() => setActiveTab(id)}
+              className={`px-4 py-2 rounded-t-lg font-medium text-sm transition-colors ${
+                activeTab === id
+                  ? 'bg-gray-700 text-white border-t-2 border-purple-500'
+                  : 'bg-gray-900 text-gray-400 hover:text-white hover:bg-gray-800'
+              }`}>
+              <i className={`fas fa-${icon} mr-2`}></i>{label}
+            </button>
+          ))}
         </div>
       </header>
     );
 
+    /* ─── Stat Card ───────────────────────────────────────── */
+    const StatCard = ({ icon, iconColor, value, label }) => (
+      <div className="bg-gray-800 rounded-xl border border-gray-700 p-4 flex flex-col items-center gap-1">
+        <i className={`fas fa-${icon} text-2xl ${iconColor}`}></i>
+        <div className="text-2xl font-bold">{value}</div>
+        <div className="text-xs text-gray-400">{label}</div>
+      </div>
+    );
+
+    /* ─── ThreatCard ──────────────────────────────────────── */
     const ThreatCard = ({ threat, onAction, isProcessing }) => {
       const [expanded, setExpanded] = useState(false);
-      const severityColors = {
-        critical: 'border-red-500 threat-high',
-        high: 'border-orange-500',
-        medium: 'border-yellow-500',
-        low: 'border-blue-500'
-      };
-
-      const actionButtons = [
-        { id: 'block', label: 'Block IP', icon: 'ban', color: 'red' },
-        { id: 'rate_limit', label: 'Rate Limit', icon: 'tachometer-alt', color: 'orange' },
-        { id: 'isolate', label: 'Isolate Host', icon: 'cube', color: 'purple' },
-        { id: 'monitor', label: 'Monitor', icon: 'eye', color: 'blue' }
+      const buttons = [
+        { id: 'block',      label: 'Block IP',    icon: 'ban',             color: 'red'    },
+        { id: 'rate_limit', label: 'Rate Limit',  icon: 'tachometer-alt',  color: 'orange' },
+        { id: 'isolate',    label: 'Isolate',     icon: 'cube',            color: 'purple' },
+        { id: 'monitor',    label: 'Monitor',     icon: 'eye',             color: 'blue'   }
       ];
+      const reasons = Array.isArray(threat.reason) ? threat.reason : [];
 
       return (
-        <div className={`bg-gray-800 border rounded-lg p-4 ${severityColors[threat.severity] || 'border-gray-700'} ${isProcessing ? 'opacity-50' : ''}`}>
+        <div className={`bg-gray-800 border rounded-lg p-4 transition-all ${severityColor(threat.severity)} ${isProcessing ? 'opacity-50 pointer-events-none' : ''}`}>
           <div className="flex justify-between items-start mb-3">
-            <div className="flex items-center space-x-3">
-              <span className={`px-2 py-1 rounded text-xs font-semibold ${
-                threat.severity === 'critical' ? 'bg-red-600' :
-                threat.severity === 'high' ? 'bg-orange-600' :
-                threat.severity === 'medium' ? 'bg-yellow-600' :
-                'bg-blue-600'
-              }`}>
-                {threat.severity?.toUpperCase()}
+            <div className="flex items-center gap-2 flex-wrap">
+              <span className={`px-2 py-0.5 rounded text-xs font-bold ${severityBadge(threat.severity)}`}>
+                {(threat.severity || 'unknown').toUpperCase()}
               </span>
               <span className="text-sm text-gray-400">{new Date(threat.timestamp).toLocaleTimeString()}</span>
-              {threat.automatic && (
-                <span className="px-2 py-1 bg-green-600 rounded text-xs">
-                  <i className="fas fa-robot mr-1"></i>Auto
-                </span>
+              {threat.blocked && (
+                <span className="px-2 py-0.5 bg-red-800 text-red-200 rounded text-xs">BLOCKED</span>
               )}
             </div>
-            <button 
-              onClick={() => setExpanded(!expanded)}
-              className="text-gray-400 hover:text-white"
-            >
+            <button onClick={() => setExpanded(e => !e)} className="text-gray-500 hover:text-white">
               <i className={`fas fa-chevron-${expanded ? 'up' : 'down'}`}></i>
             </button>
           </div>
 
-          <div className="space-y-2">
-            <div className="flex justify-between">
-              <span className="text-gray-400">Attack Type:</span>
-              <span className="font-semibold">{threat.attack_type}</span>
-            </div>
-            <div className="flex justify-between">
-              <span className="text-gray-400">Source IP:</span>
-              <span className="font-mono">{threat.source_ip}</span>
-            </div>
-            <div className="flex justify-between">
-              <span className="text-gray-400">Confidence:</span>
-              <span>{Math.round((threat.confidence || 0) * 100)}%</span>
-            </div>
-            <div className="flex justify-between">
-              <span className="text-gray-400">Status:</span>
+          <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-sm">
+            <div><span className="text-gray-400">Attack Type:</span> <span className="font-semibold">{threat.attack_type || '—'}</span></div>
+            <div><span className="text-gray-400">Source IP:</span> <span className="font-mono">{threat.source_ip || '—'}</span></div>
+            <div><span className="text-gray-400">Confidence:</span> <span>{Math.round((threat.confidence || 0) * 100)}%</span></div>
+            <div>
+              <span className="text-gray-400">Status:</span>{' '}
               <span className={threat.blocked ? 'text-red-400' : 'text-green-400'}>
                 {threat.blocked ? 'Blocked' : 'Active'}
               </span>
@@ -140,20 +210,19 @@
 
           {expanded && (
             <div className="mt-3 pt-3 border-t border-gray-700">
-              <div className="text-sm text-gray-300 mb-3">
-                <div className="font-semibold mb-1">Reasons:</div>
-                <div>{threat.reason?.join(', ') || 'No reasons provided'}</div>
-              </div>
+              {reasons.length > 0 && (
+                <div className="text-sm text-gray-300 mb-3">
+                  <span className="font-semibold text-gray-400">Reasons: </span>
+                  {reasons.join(', ')}
+                </div>
+              )}
               <div className="grid grid-cols-2 gap-2">
-                {actionButtons.map(action => (
-                  <button
-                    key={action.id}
-                    onClick={() => onAction(threat, action.id)}
-                    disabled={isProcessing}
-                    className={`bg-${action.color}-600 hover:bg-${action.color}-700 disabled:opacity-50 px-3 py-2 rounded text-sm flex items-center justify-center space-x-2 transition-colors`}
-                  >
-                    <i className={`fas fa-${action.icon}`}></i>
-                    <span>{action.label}</span>
+                {buttons.map(btn => (
+                  <button key={btn.id}
+                    onClick={() => onAction(threat, btn.id)}
+                    className={`bg-${btn.color}-700 hover:bg-${btn.color}-600 px-3 py-2 rounded text-sm flex items-center justify-center gap-2 transition-colors`}>
+                    <i className={`fas fa-${btn.icon}`}></i>
+                    <span>{btn.label}</span>
                   </button>
                 ))}
               </div>
@@ -163,229 +232,135 @@
       );
     };
 
+    /* ─── ActionTimeline ──────────────────────────────────── */
     const ActionTimeline = ({ actions }) => {
-      const timelineRef = useRef(null);
-
-      const sortedActions = useMemo(() => 
-        [...actions].sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp))
-      , [actions]);
+      const sorted = useMemo(() =>
+        [...actions].sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp)),
+        [actions]
+      );
 
       return (
-        <div className="bg-gray-800 rounded-lg border border-gray-700 p-6">
-          <h2 className="text-xl font-semibold mb-4 flex items-center">
-            <i className="fas fa-history text-purple-400 mr-2"></i>
+        <div>
+          <h3 className="text-lg font-semibold text-gray-300 mb-4 flex items-center gap-2">
+            <i className="fas fa-history text-purple-400"></i>
             Action Timeline
-          </h2>
-          <div className="relative max-h-96 overflow-y-auto">
-            <div className="timeline-line"></div>
-            {sortedActions.length === 0 ? (
-              <div className="text-center text-gray-500 py-8">
-                <i className="fas fa-history text-4xl mb-3"></i>
+            <span className="text-sm font-normal text-gray-500">({actions.length})</span>
+          </h3>
+          <div className="space-y-3 max-h-[520px] overflow-y-auto pr-1">
+            {sorted.length === 0 ? (
+              <div className="text-center py-10 text-gray-500">
+                <i className="fas fa-clock text-4xl mb-3"></i>
                 <p>No automated actions yet</p>
               </div>
-            ) : (
-              <div className="space-y-4">
-                {sortedActions.map((action, idx) => (
-                  <div key={idx} className="flex items-start space-x-4">
-                    <div className={`w-4 h-4 rounded-full border-2 border-gray-800 z-10 ${
-                      action.status === 'success' ? 'bg-green-500' :
-                      action.status === 'failed' ? 'bg-red-500' :
-                      'bg-yellow-500'
-                    }`}></div>
-                    <div className="flex-1 bg-gray-700 rounded-lg p-3">
-                      <div className="flex justify-between items-start mb-2">
-                        <div className="flex items-center space-x-2">
-                          <span className={`px-2 py-1 rounded text-xs font-semibold ${
-                            action.action === 'BLOCK' ? 'bg-red-600' :
-                            action.action === 'RATE_LIMIT' ? 'bg-orange-600' :
-                            action.action === 'ISOLATE' ? 'bg-purple-600' :
-                            'bg-blue-600'
-                          }`}>
-                            {action.action}
-                          </span>
-                          {action.automatic && (
-                            <span className="px-2 py-1 bg-green-600 rounded text-xs">
-                              <i className="fas fa-robot mr-1"></i>Auto
-                            </span>
-                          )}
-                          {action.manual && (
-                            <span className="px-2 py-1 bg-blue-600 rounded text-xs">
-                              <i className="fas fa-user mr-1"></i>Manual
-                            </span>
-                          )}
-                        </div>
-                        <div className="text-right">
-                          <span className="text-xs text-gray-400">
-                            {new Date(action.timestamp).toLocaleTimeString()}
-                          </span>
-                          {action.processingTime && (
-                            <div className="text-xs text-gray-500">
-                              {action.processingTime.toFixed(0)}ms
-                            </div>
-                          )}
-                        </div>
-                      </div>
-                      <div className="text-sm">
-                        <div className="text-gray-300">Target: {action.target}</div>
-                        <div className="text-gray-400">Reason: {action.reason}</div>
-                        <div className="flex justify-between items-center mt-1">
-                          <div className="text-gray-500 text-xs">
-                            Confidence: {Math.round((action.confidence || 0) * 100)}%
-                          </div>
-                          {action.attackType && (
-                            <div className="text-purple-400 text-xs">
-                              {action.attackType}
-                            </div>
-                          )}
-                        </div>
-                      </div>
-                    </div>
+            ) : sorted.map(a => (
+              <div key={a.id} className={`bg-gray-800 rounded-lg p-4 border-l-4 ${
+                a.action === 'BLOCK' ? 'border-red-500' :
+                a.action === 'RATE_LIMIT' ? 'border-orange-500' :
+                a.action === 'ISOLATE' ? 'border-purple-500' : 'border-blue-500'
+              }`}>
+                <div className="flex justify-between items-center mb-2 flex-wrap gap-2">
+                  <div className="flex items-center gap-2">
+                    <span className={`px-2 py-0.5 rounded text-xs font-bold ${actionBadge(a.action)}`}>
+                      {a.action}
+                    </span>
+                    {a.automatic && (
+                      <span className="px-2 py-0.5 bg-green-700 rounded text-xs flex items-center gap-1">
+                        <i className="fas fa-robot text-xs"></i>Auto
+                      </span>
+                    )}
+                    {a.manual && (
+                      <span className="px-2 py-0.5 bg-blue-700 rounded text-xs flex items-center gap-1">
+                        <i className="fas fa-user text-xs"></i>Manual
+                      </span>
+                    )}
                   </div>
-                ))}
+                  <div className="text-xs text-gray-400 text-right">
+                    <div>{new Date(a.timestamp).toLocaleTimeString()}</div>
+                    {a.processingTime && <div className="text-gray-600">{a.processingTime.toFixed(0)}ms</div>}
+                  </div>
+                </div>
+                <div className="text-sm space-y-1">
+                  <div><span className="text-gray-400">Target:</span> <span className="font-mono">{a.target || '—'}</span></div>
+                  <div><span className="text-gray-400">Reason:</span> <span className="text-gray-300">{a.reason || '—'}</span></div>
+                  <div><span className="text-gray-400">Confidence:</span> {Math.round((a.confidence || 0) * 100)}%</div>
+                  {a.attackType && <div className="text-purple-400 text-xs">{a.attackType}</div>}
+                </div>
               </div>
-            )}
+            ))}
           </div>
         </div>
       );
     };
 
+    /* ─── MetricsPanel ────────────────────────────────────── */
     const MetricsPanel = ({ threats, actions }) => {
-      const [chartData, setChartData] = useState({ labels: [], block: [], rateLimit: [], isolate: [] });
       const chartRef = useRef(null);
-
-      useEffect(() => {
-        const now = new Date();
-        const labels = [];
-        const block = [];
-        const rateLimit = [];
-        const isolate = [];
-
-        for (let i = 23; i >= 0; i--) {
-          const time = new Date(now - i * 60 * 60 * 1000);
-          labels.push(time.getHours() + ':00');
-          
-          const hourActions = actions.filter(a => 
-            new Date(a.timestamp).getHours() === time.getHours()
-          );
-          
-          block.push(hourActions.filter(a => a.action === 'BLOCK').length);
-          rateLimit.push(hourActions.filter(a => a.action === 'RATE_LIMIT').length);
-          isolate.push(hourActions.filter(a => a.action === 'ISOLATE').length);
-        }
-
-        setChartData({ labels, block, rateLimit, isolate });
-      }, [actions]);
-
-      useEffect(() => {
-        if (chartRef.current && chartData.labels.length > 0) {
-          const ctx = chartRef.current.getContext('2d');
-          if (chartRef.current._chart) {
-            chartRef.current._chart.destroy();
-          }
-          
-          chartRef.current._chart = new Chart(ctx, {
-            type: 'line',
-            data: {
-              labels: chartData.labels,
-              datasets: [
-                {
-                  label: 'Block Actions',
-                  data: chartData.block,
-                  borderColor: '#ef4444',
-                  backgroundColor: 'rgba(239, 68, 68, 0.1)',
-                  tension: 0.4
-                },
-                {
-                  label: 'Rate Limit Actions',
-                  data: chartData.rateLimit,
-                  borderColor: '#f59e0b',
-                  backgroundColor: 'rgba(245, 158, 11, 0.1)',
-                  tension: 0.4
-                },
-                {
-                  label: 'Isolate Actions',
-                  data: chartData.isolate,
-                  borderColor: '#8b5cf6',
-                  backgroundColor: 'rgba(139, 92, 246, 0.1)',
-                  tension: 0.4
-                }
-              ]
-            },
-            options: {
-              responsive: true,
-              maintainAspectRatio: false,
-              plugins: {
-                legend: {
-                  labels: { color: '#e5e7eb' }
-                }
-              },
-              scales: {
-                x: {
-                  ticks: { color: '#9ca3af' },
-                  grid: { color: 'rgba(156, 163, 175, 0.1)' }
-                },
-                y: {
-                  ticks: { color: '#9ca3af' },
-                  grid: { color: 'rgba(156, 163, 175, 0.1)' }
-                }
-              }
-            }
-          });
-        }
-      }, [chartData]);
+      const chartInstance = useRef(null);
 
       const stats = useMemo(() => {
-        const recentThreats = threats.filter(t => 
-          new Date(t.timestamp) > new Date() - 60 * 60 * 1000
-        );
-        const recentActions = actions.filter(a => 
-          new Date(a.timestamp) > new Date() - 60 * 60 * 1000
-        );
-
+        const blocked   = actions.filter(a => a.action === 'BLOCK').length;
+        const success   = actions.filter(a => a.status === 'success').length;
         return {
           totalThreats: threats.length,
-          recentThreats: recentThreats.length,
           totalActions: actions.length,
-          recentActions: recentActions.length,
-          blocked: actions.filter(a => a.action === 'BLOCK').length,
-          rateLimited: actions.filter(a => a.action === 'RATE_LIMIT').length,
-          isolated: actions.filter(a => a.action === 'ISOLATE').length,
-          successRate: actions.length > 0 ? 
-            (actions.filter(a => a.status === 'success').length / actions.length * 100).toFixed(1) : 0
+          blocked,
+          successRate: actions.length > 0 ? (success / actions.length * 100).toFixed(1) : '100.0'
         };
       }, [threats, actions]);
 
-      return (
-        <div className="space-y-6">
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-            <div className="bg-gray-800 border border-gray-700 rounded-lg p-4 text-center">
-              <i className="fas fa-shield-alt text-red-400 text-2xl mb-2"></i>
-              <div className="text-2xl font-bold">{stats.totalThreats}</div>
-              <div className="text-sm text-gray-400">Total Threats</div>
-            </div>
-            <div className="bg-gray-800 border border-gray-700 rounded-lg p-4 text-center">
-              <i className="fas fa-play-circle text-green-400 text-2xl mb-2"></i>
-              <div className="text-2xl font-bold">{stats.totalActions}</div>
-              <div className="text-sm text-gray-400">Total Actions</div>
-            </div>
-            <div className="bg-gray-800 border border-gray-700 rounded-lg p-4 text-center">
-              <i className="fas fa-ban text-orange-400 text-2xl mb-2"></i>
-              <div className="text-2xl font-bold">{stats.blocked}</div>
-              <div className="text-sm text-gray-400">Blocked IPs</div>
-            </div>
-            <div className="bg-gray-800 border border-gray-700 rounded-lg p-4 text-center">
-              <i className="fas fa-chart-line text-blue-400 text-2xl mb-2"></i>
-              <div className="text-2xl font-bold">{stats.successRate}%</div>
-              <div className="text-sm text-gray-400">Success Rate</div>
-            </div>
-          </div>
+      const chartData = useMemo(() => {
+        const now = new Date();
+        const labels = [], block = [], rateLimit = [], isolate = [];
+        for (let i = 23; i >= 0; i--) {
+          const h = new Date(now - i * 3600000);
+          labels.push(h.getHours() + ':00');
+          const ha = actions.filter(a => new Date(a.timestamp).getHours() === h.getHours());
+          block.push(ha.filter(a => a.action === 'BLOCK').length);
+          rateLimit.push(ha.filter(a => a.action === 'RATE_LIMIT').length);
+          isolate.push(ha.filter(a => a.action === 'ISOLATE').length);
+        }
+        return { labels, block, rateLimit, isolate };
+      }, [actions]);
 
-          <div className="bg-gray-800 border border-gray-700 rounded-lg p-6">
-            <h3 className="text-lg font-semibold mb-4 flex items-center">
-              <i className="fas fa-chart-area text-purple-400 mr-2"></i>
+      useEffect(() => {
+        if (!chartRef.current) return;
+        if (chartInstance.current) chartInstance.current.destroy();
+        chartInstance.current = new Chart(chartRef.current.getContext('2d'), {
+          type: 'line',
+          data: {
+            labels: chartData.labels,
+            datasets: [
+              { label: 'Block Actions',      data: chartData.block,     borderColor: '#ef4444', backgroundColor: 'rgba(239,68,68,.1)',    tension: 0.4 },
+              { label: 'Rate Limit Actions', data: chartData.rateLimit, borderColor: '#f59e0b', backgroundColor: 'rgba(245,158,11,.1)',   tension: 0.4 },
+              { label: 'Isolate Actions',    data: chartData.isolate,   borderColor: '#8b5cf6', backgroundColor: 'rgba(139,92,246,.1)',   tension: 0.4 }
+            ]
+          },
+          options: {
+            responsive: true, maintainAspectRatio: false,
+            plugins: { legend: { labels: { color: '#d1d5db', boxWidth: 12, font: { size: 11 } } } },
+            scales: {
+              x: { ticks: { color: '#9ca3af', font: { size: 10 } }, grid: { color: 'rgba(156,163,175,.1)' } },
+              y: { ticks: { color: '#9ca3af', font: { size: 10 } }, grid: { color: 'rgba(156,163,175,.1)' }, beginAtZero: true }
+            }
+          }
+        });
+        return () => { if (chartInstance.current) chartInstance.current.destroy(); };
+      }, [chartData]);
+
+      return (
+        <div className="space-y-4">
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+            <StatCard icon="shield-virus"  iconColor="text-blue-400"   value={stats.totalThreats} label="Total Threats" />
+            <StatCard icon="play-circle"   iconColor="text-green-400"  value={stats.totalActions} label="Total Actions" />
+            <StatCard icon="ban"           iconColor="text-red-400"    value={stats.blocked}      label="Blocked IPs"  />
+            <StatCard icon="chart-line"    iconColor="text-purple-400" value={`${stats.successRate}%`} label="Success Rate" />
+          </div>
+          <div className="bg-gray-800 rounded-xl border border-gray-700 p-5">
+            <h4 className="text-sm font-semibold text-gray-300 mb-3 flex items-center gap-2">
+              <i className="fas fa-chart-area text-purple-400"></i>
               24-Hour Action Trends
-            </h3>
-            <div style={{ height: '300px' }}>
+            </h4>
+            <div style={{ height: 220 }}>
               <canvas ref={chartRef}></canvas>
             </div>
           </div>
@@ -393,226 +368,288 @@
       );
     };
 
-    const App = () => {
-      const [connected, setConnected] = useState(false);
-      const [threats, setThreats] = useState([]);
-      const [actions, setActions] = useState([]);
-      const [processingThreats, setProcessingThreats] = useState(new Set());
+    /* ─── SandboxUpload ───────────────────────────────────── */
+    const SandboxUpload = () => {
+      const [file, setFile]         = useState(null);
+      const [analyzing, setAnalyzing] = useState(false);
+      const [result, setResult]     = useState(null);
+      const [error, setError]       = useState(null);
 
-      // Load initial threats from API
-      useEffect(() => {
-        fetch(`${API_BASE}/threats?limit=100`)
-          .then(r => r.ok ? r.json() : { threats: [] })
-          .then(data => {
-            const threatArray = Array.isArray(data) ? data : (data.threats || []);
-            setThreats(threatArray.filter(t => t.label === 'malicious' || t.confidence >= 0.70));
-          })
-          .catch(() => {});
-      }, []);
-
-      // WebSocket connection for real-time updates
-      useEffect(() => {
-        let ws = null;
-        let reconnectInterval = null;
-        
-        const connect = () => {
-          console.log('🔌 SOAR: Connecting to WebSocket...');
-          ws = new WebSocket(WS_URL);
-          
-          ws.onopen = () => {
-            console.log('✅ SOAR: WebSocket connected');
-            setConnected(true);
-            if (reconnectInterval) {
-              clearInterval(reconnectInterval);
-              reconnectInterval = null;
-            }
-          };
-          
-          ws.onclose = () => {
-            console.log('❌ SOAR: WebSocket disconnected');
-            setConnected(false);
-            if (!reconnectInterval) {
-              reconnectInterval = setInterval(connect, 3000);
-            }
-          };
-          
-          ws.onerror = (error) => {
-            console.log('🚨 SOAR: WebSocket error:', error);
-            setConnected(false);
-          };
-          
-          ws.onmessage = (ev) => {
-            try {
-              const msg = JSON.parse(ev.data);
-              if (msg.type === 'new_threat' && msg.data) {
-                const threat = Array.isArray(msg.data) ? msg.data[0] : msg.data;
-                
-                // Process all threats, not just malicious ones
-                if (threat.label === 'malicious' || threat.confidence >= 0.70) {
-                  setThreats(prev => {
-                    const updated = [threat, ...prev];
-                    return updated.slice(0, 100);
-                  });
-
-                  // Enhanced SOAR automation logic
-                  const confidence = threat.confidence || 0;
-                  const reasons = threat.reason || [];
-                  const isVolumetric = reasons.some(r => 
-                    r.includes('high_packets_per_second') || 
-                    r.includes('syn_flood') || 
-                    r.includes('ddos') ||
-                    r.includes('port_sweep')
-                  );
-                  
-                  // Determine SOAR action based on confidence and threat characteristics
-                  let actionType = null;
-                  let actionReason = '';
-                  
-                  if (confidence >= 0.90) {
-                    actionType = 'BLOCK';
-                    actionReason = `Critical confidence threat: ${reasons.join(', ')}`;
-                  } else if (confidence >= 0.85 && isVolumetric) {
-                    actionType = 'BLOCK';
-                    actionReason = `High confidence volumetric attack: ${reasons.join(', ')}`;
-                  } else if (confidence >= 0.70 && isVolumetric) {
-                    actionType = 'RATE_LIMIT';
-                    actionReason = `Medium confidence volumetric threat: ${reasons.join(', ')}`;
-                  } else if (confidence >= 0.75) {
-                    actionType = 'RATE_LIMIT';
-                    actionReason = `Medium-high confidence threat: ${reasons.join(', ')}`;
-                  } else if (confidence >= 0.60) {
-                    actionType = 'MONITOR';
-                    actionReason = `Suspicious activity detected: ${reasons.join(', ')}`;
-                  }
-
-                  // Execute automated SOAR action
-                  if (actionType) {
-                    const action = {
-                      id: Date.now() + Math.random(),
-                      action: actionType,
-                      target: threat.source_ip,
-                      reason: actionReason,
-                      confidence: confidence,
-                      timestamp: new Date().toISOString(),
-                      status: 'success',
-                      threatId: threat.flow_id,
-                      attackType: threat.attack_type,
-                      severity: threat.severity,
-                      automatic: true,
-                      processingTime: Math.random() * 500 + 100 // Simulate processing time
-                    };
-                    
-                    setActions(prev => [action, ...prev].slice(0, 200));
-                    
-                    // Log SOAR decision
-                    console.log(`🤖 SOAR Action: ${actionType} on ${threat.source_ip} (confidence: ${(confidence * 100).toFixed(1)}%)`);
-                  }
-                }
-              }
-            } catch (e) {
-              console.error('❌ SOAR: Error parsing message:', e);
-            }
-          };
-        };
-        
-        connect();
-        
-        return () => {
-          if (reconnectInterval) clearInterval(reconnectInterval);
-          if (ws) ws.close();
-        };
-      }, []);
-
-      const handleAction = async (threat, actionType) => {
-        // Add to processing set
-        setProcessingThreats(prev => new Set(prev).add(threat.flow_id));
-        
+      const handleUpload = async () => {
+        if (!file) { alert('Please select a file first'); return; }
+        setAnalyzing(true); setError(null);
+        const fd = new FormData();
+        fd.append('file', file);
         try {
-          // Simulate processing delay
-          await new Promise(resolve => setTimeout(resolve, 500 + Math.random() * 1000));
+          console.log('🚀 SOAR Dashboard: Starting upload...');
+          console.log('📁 File:', file.name, file.size, 'bytes');
+          console.log('🌐 Target: http://localhost:8001/analyze');
           
-          const action = {
-            id: Date.now() + Math.random(),
-            action: actionType.toUpperCase(),
-            target: threat.source_ip,
-            reason: `Manual ${actionType} action by operator`,
-            confidence: threat.confidence,
-            timestamp: new Date().toISOString(),
-            status: 'success',
-            threatId: threat.flow_id,
-            attackType: threat.attack_type,
-            severity: threat.severity,
-            manual: true,
-            processingTime: 500 + Math.random() * 1000
-          };
+          const res = await fetch('http://localhost:8001/analyze', { method: 'POST', body: fd });
           
-          setActions(prev => [action, ...prev].slice(0, 200));
+          console.log('📊 Response status:', res.status);
+          console.log('📊 Response headers:', res.headers);
           
-          // Update threat status if blocking
-          if (actionType === 'block') {
-            setThreats(prev => prev.map(t => 
-              t.flow_id === threat.flow_id ? { ...t, blocked: true } : t
-            ));
-          }
+          if (!res.ok) throw new Error(`Server error: ${res.status}`);
           
-          console.log(`👤 Manual SOAR Action: ${actionType} on ${threat.source_ip}`);
-        } catch (error) {
-          console.error('❌ Error executing manual action:', error);
-        } finally {
-          // Remove from processing set
-          setProcessingThreats(prev => {
-            const newSet = new Set(prev);
-            newSet.delete(threat.flow_id);
-            return newSet;
-          });
-        }
+          const result = await res.json();
+          console.log('✅ Analysis result:', result);
+          setResult(result);
+        } catch (e) {
+          console.error('❌ Upload error:', e);
+          console.error('❌ Error details:', e.message, e.stack);
+          setError(e.message || 'Analysis failed. Is the sandbox server running on port 8001?');
+        } finally { setAnalyzing(false); }
       };
 
-      const activeThreats = threats.filter(t => !t.blocked);
-      const recentThreats = activeThreats.slice(0, 10);
+      const verdictColor = (v) => ({ MALICIOUS: 'text-red-400', SUSPICIOUS: 'text-yellow-400' }[v] || 'text-green-400');
 
       return (
-        <>
-          <Header connected={connected} threatsCount={activeThreats.length} actionsCount={actions.length} />
-          <main className="container mx-auto px-6 py-6">
-            <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-              <div className="lg:col-span-2">
-                <div className="bg-gray-800 rounded-lg border border-gray-700 p-6 mb-6">
-                  <h2 className="text-xl font-semibold mb-4 flex items-center">
-                    <i className="fas fa-exclamation-triangle text-red-400 mr-2"></i>
-                    Active Threats ({activeThreats.length})
-                  </h2>
-                  <div className="space-y-3 max-h-96 overflow-y-auto">
-                    {recentThreats.length === 0 ? (
-                      <div className="text-center text-gray-500 py-8">
-                        <i className="fas fa-shield-alt text-4xl mb-3"></i>
-                        <p>No active threats detected</p>
-                      </div>
-                    ) : (
-                      recentThreats.map(threat => (
-                        <ThreatCard 
-                          key={threat.flow_id} 
-                          threat={threat} 
-                          onAction={handleAction}
-                          isProcessing={processingThreats.has(threat.flow_id)}
-                        />
-                      ))
-                    )}
+        <div className="space-y-6 max-w-3xl mx-auto">
+          <div className="bg-gray-800 border border-gray-700 rounded-xl p-6">
+            <h2 className="text-xl font-semibold mb-4 flex items-center gap-2">
+              <i className="fas fa-upload text-blue-400"></i>
+              Upload Suspicious File
+            </h2>
+            <label htmlFor="fileInput" className="block cursor-pointer border-2 border-dashed border-gray-600 hover:border-blue-500 rounded-xl p-8 text-center transition-colors">
+              <input type="file" id="fileInput" className="hidden" onChange={e => { setFile(e.target.files[0]); setResult(null); setError(null); }} />
+              <i className="fas fa-cloud-upload-alt text-5xl text-blue-400 mb-3"></i>
+              <p className="text-lg">Click to select or drag & drop</p>
+              <p className="text-sm text-gray-500 mt-1">EXE, DLL, PDF, DOC, and more</p>
+              {file && <p className="mt-3 text-sm text-blue-400 font-mono">{file.name} ({(file.size/1024).toFixed(1)} KB)</p>}
+            </label>
+            <button onClick={handleUpload} disabled={!file || analyzing}
+              className="mt-4 bg-blue-600 hover:bg-blue-500 disabled:bg-gray-700 disabled:cursor-not-allowed px-6 py-2.5 rounded-lg font-medium transition-colors flex items-center gap-2">
+              <i className={`fas ${analyzing ? 'fa-spinner fa-spin' : 'fa-play'}`}></i>
+              {analyzing ? 'Analyzing...' : 'Analyze File'}
+            </button>
+            {error && (
+              <div className="mt-4 p-3 bg-red-900/50 border border-red-700 rounded-lg text-red-300 text-sm">
+                <i className="fas fa-exclamation-triangle mr-2"></i>{error}
+              </div>
+            )}
+          </div>
+
+          {result && !result.error && (
+            <div className="space-y-4">
+              {/* Static Analysis */}
+              <div className="bg-gray-800 border border-gray-700 rounded-xl p-6">
+                <h3 className="text-lg font-semibold mb-4 flex items-center gap-2">
+                  <i className="fas fa-search text-yellow-400"></i>Static Analysis
+                </h3>
+                <div className="grid grid-cols-2 gap-3 text-sm mb-4">
+                  {[
+                    ['File Type',  result.static_analysis?.file_info?.file_type, false],
+                    ['File Size',  `${result.static_analysis?.file_info?.file_size} bytes`, false],
+                    ['Entropy',    result.static_analysis?.entropy?.toFixed(2), result.static_analysis?.entropy > 7.5],
+                    ['Packed',     result.static_analysis?.packed ? 'YES' : 'NO', result.static_analysis?.packed],
+                  ].map(([label, val, warn]) => (
+                    <div key={label} className="bg-gray-900 rounded-lg p-3">
+                      <span className="text-gray-400 block text-xs mb-1">{label}</span>
+                      <span className={warn ? 'text-red-400 font-semibold' : 'text-gray-100'}>{val}</span>
+                    </div>
+                  ))}
+                </div>
+                <div>
+                  <span className="text-gray-400 text-sm">Suspicious Strings:</span>
+                  <div className="mt-2 flex flex-wrap gap-2">
+                    {(result.static_analysis?.suspicious_strings || []).length === 0
+                      ? <span className="text-green-400 text-sm">None detected</span>
+                      : (result.static_analysis.suspicious_strings).map((s, i) => (
+                          <span key={i} className="bg-red-800 text-red-200 px-2 py-1 rounded text-xs font-mono">{s}</span>
+                        ))
+                    }
                   </div>
                 </div>
-                <ActionTimeline actions={actions} />
               </div>
-              <div className="space-y-6">
-                <MetricsPanel threats={threats} actions={actions} />
+
+              {/* Sandbox Analysis */}
+              <div className="bg-gray-800 border border-gray-700 rounded-xl p-6">
+                <h3 className="text-lg font-semibold mb-4 flex items-center gap-2">
+                  <i className="fas fa-vial text-purple-400"></i>Sandbox Analysis
+                </h3>
+                <div className="grid grid-cols-2 md:grid-cols-3 gap-3 text-sm">
+                  {[
+                    ['Process Created',    result.sandbox_analysis?.process_created],
+                    ['Registry Modified',  result.sandbox_analysis?.registry_modified],
+                    ['Network Connection', result.sandbox_analysis?.network_connection],
+                    ['C2 Attempt',         result.sandbox_analysis?.c2_attempt],
+                    ['File Dropped',       result.sandbox_analysis?.file_dropped],
+                    ['Suspicious API',     result.sandbox_analysis?.suspicious_api_calls],
+                  ].map(([label, val]) => (
+                    <div key={label} className="bg-gray-900 rounded-lg p-3">
+                      <span className="text-gray-400 block text-xs mb-1">{label}</span>
+                      <span className={val ? 'text-red-400 font-bold' : 'text-green-400'}>{val ? 'YES' : 'NO'}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              {/* Final Report */}
+              <div className={`bg-gray-800 border rounded-xl p-6 ${
+                result.sandbox_analysis?.verdict === 'MALICIOUS' ? 'border-red-600' :
+                result.sandbox_analysis?.verdict === 'SUSPICIOUS' ? 'border-yellow-600' : 'border-green-600'
+              }`}>
+                <h3 className="text-lg font-semibold mb-4 text-center flex items-center justify-center gap-2">
+                  <i className="fas fa-file-alt"></i>Analysis Report
+                </h3>
+                <div className="flex flex-col items-center gap-4">
+                  <div className="text-center">
+                    <div className="text-gray-400 text-sm mb-1">Final Risk Score</div>
+                    <div className={`text-4xl font-black ${verdictColor(result.sandbox_analysis?.verdict)}`}>
+                      {result.sandbox_analysis?.risk_score}<span className="text-xl">/100</span>
+                    </div>
+                  </div>
+                  <div className="text-center">
+                    <div className="text-gray-400 text-sm mb-1">Verdict</div>
+                    <div className={`text-2xl font-bold ${verdictColor(result.sandbox_analysis?.verdict)}`}>
+                      {result.sandbox_analysis?.verdict}
+                    </div>
+                  </div>
+                  <div className="text-center">
+                    <div className="text-gray-400 text-sm mb-1">Action Taken</div>
+                    <div className="text-xl font-bold text-blue-400">{result.sandbox_analysis?.action}</div>
+                  </div>
+                  <div className="text-center mt-2 w-full">
+                    <div className="text-gray-400 text-xs mb-1">SHA256</div>
+                    <div className="text-xs font-mono text-gray-400 break-all bg-gray-900 p-2 rounded">
+                      {result.static_analysis?.sha256}
+                    </div>
+                  </div>
+                </div>
               </div>
             </div>
-          </main>
-        </>
+          )}
+
+          {result?.error && (
+            <div className="p-4 bg-red-900/40 border border-red-700 rounded-xl text-red-300 text-sm">
+              <i className="fas fa-exclamation-circle mr-2"></i>{result.error}
+            </div>
+          )}
+        </div>
       );
     };
 
-    const root = ReactDOM.createRoot(document.getElementById('root'));
-    root.render(<App />);
+    /* ─── App ─────────────────────────────────────────────── */
+    const App = () => {
+      const [connected,        setConnected]        = useState(false);
+      const [threats,          setThreats]          = useState([]);
+      const [actions,          setActions]          = useState([]);
+      const [processingIds,    setProcessingIds]    = useState(new Set());
+      const [activeTab,        setActiveTab]        = useState('threats');
+
+      /* WebSocket */
+      useEffect(() => {
+        let ws;
+        const connect = () => {
+          ws = new WebSocket(WS_URL);
+          ws.onopen  = () => { setConnected(true);  console.log('🔌 WS connected'); };
+          ws.onclose = () => { setConnected(false); console.log('❌ WS disconnected'); setTimeout(connect, 3000); };
+          ws.onerror = () => { setConnected(false); };
+          ws.onmessage = (e) => {
+            try {
+              const data = JSON.parse(e.data);
+              if (data.type === 'new_threat' && data.data) {
+                const t = Array.isArray(data.data) ? data.data[0] : data.data;
+                if (!t) return;
+
+                // Enrich with severity
+                const conf = t.confidence || 0;
+                t.severity = conf >= 0.90 ? 'critical' : conf >= 0.80 ? 'high' : conf >= 0.60 ? 'medium' : 'low';
+
+                setThreats(prev => {
+                  if (prev.some(x => x.flow_id === t.flow_id)) return prev;
+                  return [t, ...prev].slice(0, 50);
+                });
+
+                const soar = buildSOARAction(t);
+                if (soar.action !== 'MONITOR') {
+                  setActions(prev => [soar, ...prev].slice(0, 200));
+                }
+              }
+            } catch (err) { console.error('WS parse error', err); }
+          };
+        };
+        connect();
+        return () => { if (ws) ws.close(); };
+      }, []);
+
+      /* Manual actions */
+      const handleAction = useCallback(async (threat, actionType) => {
+        const fid = threat.flow_id;
+        setProcessingIds(prev => new Set(prev).add(fid));
+        try {
+          await new Promise(r => setTimeout(r, 400 + Math.random() * 600));
+          const action = buildSOARAction(threat, true, actionType);
+          setActions(prev => [action, ...prev].slice(0, 200));
+          if (actionType === 'block') {
+            setThreats(prev => prev.map(t => t.flow_id === fid ? { ...t, blocked: true } : t));
+          }
+        } finally {
+          setProcessingIds(prev => { const s = new Set(prev); s.delete(fid); return s; });
+        }
+      }, []);
+
+      const activeThreats = threats.filter(t => !t.blocked);
+
+      return (
+        <div className="min-h-screen">
+          <Header
+            connected={connected}
+            threatsCount={threats.length}
+            actionsCount={actions.length}
+            activeTab={activeTab}
+            setActiveTab={setActiveTab}
+          />
+
+          <main className="container mx-auto p-6">
+            {activeTab === 'threats' ? (
+              <div className="space-y-6">
+                {/* Top row: threats + timeline */}
+                <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+
+                  {/* Active Threats */}
+                  <div>
+                    <h2 className="text-lg font-semibold text-gray-300 mb-4 flex items-center gap-2">
+                      <i className="fas fa-exclamation-triangle text-orange-400"></i>
+                      Active Threats ({activeThreats.length})
+                    </h2>
+                    <div className="space-y-3 max-h-[520px] overflow-y-auto pr-1">
+                      {activeThreats.length === 0 ? (
+                        <div className="text-center py-12 text-gray-500">
+                          <i className="fas fa-shield-alt text-5xl mb-3"></i>
+                          <p>No active threats detected</p>
+                          <p className="text-xs mt-1">Waiting for WebSocket data…</p>
+                        </div>
+                      ) : activeThreats.slice(0, 15).map(t => (
+                        <ThreatCard
+                          key={t.flow_id}
+                          threat={t}
+                          onAction={handleAction}
+                          isProcessing={processingIds.has(t.flow_id)}
+                        />
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Action Timeline */}
+                  <div>
+                    <ActionTimeline actions={actions} />
+                  </div>
+                </div>
+
+                {/* Metrics */}
+                <MetricsPanel threats={threats} actions={actions} />
+              </div>
+            ) : (
+              <SandboxUpload />
+            )}
+          </main>
+        </div>
+      );
+    };
+
+    ReactDOM.render(<App />, document.getElementById('root'));
   </script>
 </body>
 </html>

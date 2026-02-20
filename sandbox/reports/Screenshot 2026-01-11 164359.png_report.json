@@ -1,0 +1,30 @@
+{
+  "filename": "Screenshot 2026-01-11 164359.png",
+  "timestamp": "2026-02-20T17:29:15.171699",
+  "static_analysis": {
+    "file_info": {
+      "file_size": 267914,
+      "file_type": "Unknown file (.png)",
+      "extension": ".png",
+      "created_time": "2026-02-20T17:29:15.060841",
+      "modified_time": "2026-02-20T17:29:15.060841"
+    },
+    "entropy": 0.0,
+    "packed": false,
+    "suspicious_strings": [],
+    "sha256": "c7b8cc552fc455f3342d442a03f8e02de9eca55600dfbf2e90bd4571bffffa85",
+    "md5": "b070dae5eed579aa7ce7cde33a724099"
+  },
+  "sandbox_analysis": {
+    "process_created": true,
+    "registry_modified": false,
+    "network_connection": false,
+    "c2_attempt": false,
+    "file_dropped": false,
+    "suspicious_api_calls": false,
+    "risk_score": 12.5,
+    "verdict": "CLEAN",
+    "action": "ALLOW"
+  },
+  "file_path": "sandbox\\uploads\\Screenshot 2026-01-11 164359.png"
+}

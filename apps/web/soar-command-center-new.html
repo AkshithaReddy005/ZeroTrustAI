@@ -1,0 +1,432 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>🤖 SOAR Command Center - ZeroTrust-AI</title>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" />
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <style>
+    @keyframes pulse-red {
+      0%, 100% { background-color: rgba(239, 68, 68, .1); }
+      50% { background-color: rgba(239, 68, 68, .2); }
+    }
+    @keyframes pulse-green {
+      0%, 100% { background-color: rgba(34, 197, 94, .1); }
+      50% { background-color: rgba(34, 197, 94, .2); }
+    }
+    .threat-high { animation: pulse-red 2s infinite; }
+    .soar-active { animation: pulse-green 2s infinite; }
+    .cyber-grid {
+      background-image: linear-gradient(rgba(168, 85, 247, .08) 1px, transparent 1px), 
+                        linear-gradient(90deg, rgba(168, 85, 247, .08) 1px, transparent 1px);
+      background-size: 50px 50px;
+    }
+    .timeline-line {
+      background: linear-gradient(180deg, #8b5cf6 0%, #3b82f6 100%);
+      width: 2px;
+      position: absolute;
+      left: 20px;
+      top: 0;
+      bottom: 0;
+    }
+  </style>
+</head>
+<body class="bg-gray-900 text-white cyber-grid">
+  <div id="root"></div>
+  <script type="text/babel">
+    const { useEffect, useState, useRef, useMemo } = React;
+    const API_BASE = 'http://localhost:9000';
+    const WS_URL = 'ws://localhost:9000/ws';
+
+    const Header = ({ connected, threatsCount, actionsCount, activeTab, setActiveTab }) => (
+      <header className="bg-gray-800 border-b border-purple-500 px-6 py-4">
+        <div className="container mx-auto">
+          <div className="flex justify-between items-center mb-4">
+            <div className="flex items-center space-x-4">
+              <i className="fas fa-robot text-purple-500 text-2xl"></i>
+              <h1 className="text-2xl font-bold bg-gradient-to-r from-purple-400 to-blue-500 bg-clip-text text-transparent">
+                SOAR Command Center
+              </h1>
+            </div>
+            <div className="flex items-center space-x-6">
+              <div className="flex items-center space-x-2">
+                <div className={`w-3 h-3 rounded-full ${connected ? 'bg-green-500' : 'bg-red-500'}`}></div>
+                <span className="text-sm">{connected ? 'Connected' : 'Disconnected'}</span>
+              </div>
+              <div className="text-sm">
+                <span className="text-gray-400">Threats:</span>
+                <span className="ml-2 font-bold text-blue-400">{threatsCount}</span>
+              </div>
+              <div className="text-sm">
+                <span className="text-gray-400">Actions:</span>
+                <span className="ml-2 font-bold text-green-400">{actionsCount}</span>
+              </div>
+            </div>
+          </div>
+          
+          {/* Navigation Tabs */}
+          <div className="flex space-x-1">
+            <button
+              onClick={() => setActiveTab('threats')}
+              className={`px-4 py-2 rounded-t-lg font-medium transition-colors ${
+                activeTab === 'threats' 
+                  ? 'bg-gray-700 text-white border-t-2 border-purple-500' 
+                  : 'bg-gray-900 text-gray-400 hover:text-white hover:bg-gray-800'
+              }`}
+            >
+              <i className="fas fa-shield-virus mr-2"></i>
+              Threat Response
+            </button>
+            <button
+              onClick={() => setActiveTab('sandbox')}
+              className={`px-4 py-2 rounded-t-lg font-medium transition-colors ${
+                activeTab === 'sandbox' 
+                  ? 'bg-gray-700 text-white border-t-2 border-purple-500' 
+                  : 'bg-gray-900 text-gray-400 hover:text-white hover:bg-gray-800'
+              }`}
+            >
+              <i className="fas fa-vial mr-2"></i>
+              Sandbox Analysis
+            </button>
+          </div>
+        </div>
+      </header>
+    );
+
+    const SandboxUpload = () => {
+      const [file, setFile] = useState(null);
+      const [analyzing, setAnalyzing] = useState(false);
+      const [result, setResult] = useState(null);
+
+      const handleFileUpload = async () => {
+        if (!file) {
+          alert('Please select a file first');
+          return;
+        }
+
+        setAnalyzing(true);
+        const formData = new FormData();
+        formData.append('file', file);
+
+        try {
+          const response = await fetch('http://localhost:8001/analyze', {
+            method: 'POST',
+            body: formData
+          });
+          const analysisResult = await response.json();
+          setResult(analysisResult);
+        } catch (error) {
+          console.error('Analysis failed:', error);
+          alert('File analysis failed');
+        } finally {
+          setAnalyzing(false);
+        }
+      };
+
+      const getVerdictColor = (verdict) => {
+        switch(verdict) {
+          case 'MALICIOUS': return 'text-red-400';
+          case 'SUSPICIOUS': return 'text-yellow-400';
+          default: return 'text-green-400';
+        }
+      };
+
+      return (
+        <div className="space-y-6">
+          {/* File Upload Section */}
+          <div className="bg-gray-800 rounded-lg p-6">
+            <h2 className="text-xl font-semibold mb-4">
+              <i className="fas fa-upload mr-2"></i>
+              Upload Suspicious File
+            </h2>
+            <div className="border-2 border-dashed border-gray-600 rounded-lg p-8 text-center">
+              <input 
+                type="file" 
+                onChange={(e) => setFile(e.target.files[0])}
+                className="hidden" 
+                id="fileInput" 
+              />
+              <label htmlFor="fileInput" className="cursor-pointer">
+                <i className="fas fa-cloud-upload-alt text-4xl text-blue-400 mb-4"></i>
+                <p className="text-lg">Click to upload or drag and drop</p>
+                <p className="text-sm text-gray-400">Supports EXE, DLL, PDF, DOC, etc.</p>
+                {file && (
+                  <p className="mt-2 text-sm text-blue-400">
+                    Selected: {file.name}
+                  </p>
+                )}
+              </label>
+            </div>
+            <button 
+              onClick={handleFileUpload}
+              disabled={!file || analyzing}
+              className="mt-4 bg-blue-600 hover:bg-blue-700 disabled:bg-gray-600 px-6 py-2 rounded-lg transition-colors"
+            >
+              <i className="fas fa-play mr-2"></i>
+              {analyzing ? 'Analyzing...' : 'Analyze File'}
+            </button>
+          </div>
+
+          {/* Results Section */}
+          {result && (
+            <div className="space-y-6">
+              {/* Static Analysis */}
+              <div className="bg-gray-800 rounded-lg p-6">
+                <h3 className="text-xl font-semibold mb-4">
+                  <i className="fas fa-search mr-2"></i>
+                  Static Analysis
+                </h3>
+                <div className="grid grid-cols-2 gap-4">
+                  <div>
+                    <span className="text-gray-400">File Type:</span>
+                    <span className="ml-2">{result.static_analysis.file_info.file_type}</span>
+                  </div>
+                  <div>
+                    <span className="text-gray-400">File Size:</span>
+                    <span className="ml-2">{result.static_analysis.file_info.file_size} bytes</span>
+                  </div>
+                  <div>
+                    <span className="text-gray-400">Entropy:</span>
+                    <span className={`ml-2 ${result.static_analysis.entropy > 7.5 ? 'text-red-400' : 'text-green-400'}`}>
+                      {result.static_analysis.entropy.toFixed(2)}
+                    </span>
+                  </div>
+                  <div>
+                    <span className="text-gray-400">Packed:</span>
+                    <span className={`ml-2 ${result.static_analysis.packed ? 'text-red-400' : 'text-green-400'}`}>
+                      {result.static_analysis.packed ? 'YES' : 'NO'}
+                    </span>
+                  </div>
+                </div>
+                <div className="mt-4">
+                  <span className="text-gray-400">Suspicious Strings:</span>
+                  <div className="mt-2 flex flex-wrap gap-2">
+                    {result.static_analysis.suspicious_strings.map((s, i) => (
+                      <span key={i} className="bg-red-600 px-2 py-1 rounded text-sm">
+                        {s}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              </div>
+
+              {/* Sandbox Analysis */}
+              <div className="bg-gray-800 rounded-lg p-6">
+                <h3 className="text-xl font-semibold mb-4">
+                  <i className="fas fa-vial mr-2"></i>
+                  Sandbox Analysis
+                </h3>
+                <div className="grid grid-cols-2 gap-4">
+                  <div>
+                    <span className="text-gray-400">Process Created:</span>
+                    <span className={`ml-2 ${result.sandbox_analysis.process_created ? 'text-red-400' : 'text-green-400'}`}>
+                      {result.sandbox_analysis.process_created ? 'YES' : 'NO'}
+                    </span>
+                  </div>
+                  <div>
+                    <span className="text-gray-400">Registry Modified:</span>
+                    <span className={`ml-2 ${result.sandbox_analysis.registry_modified ? 'text-red-400' : 'text-green-400'}`}>
+                      {result.sandbox_analysis.registry_modified ? 'YES' : 'NO'}
+                    </span>
+                  </div>
+                  <div>
+                    <span className="text-gray-400">Network Connection:</span>
+                    <span className={`ml-2 ${result.sandbox_analysis.network_connection ? 'text-red-400' : 'text-green-400'}`}>
+                      {result.sandbox_analysis.network_connection ? 'YES' : 'NO'}
+                    </span>
+                  </div>
+                  <div>
+                    <span className="text-gray-400">C2 Attempt:</span>
+                    <span className={`ml-2 ${result.sandbox_analysis.c2_attempt ? 'text-red-400' : 'text-green-400'}`}>
+                      {result.sandbox_analysis.c2_attempt ? 'YES' : 'NO'}
+                    </span>
+                  </div>
+                  <div>
+                    <span className="text-gray-400">File Dropped:</span>
+                    <span className={`ml-2 ${result.sandbox_analysis.file_dropped ? 'text-red-400' : 'text-green-400'}`}>
+                      {result.sandbox_analysis.file_dropped ? 'YES' : 'NO'}
+                    </span>
+                  </div>
+                  <div>
+                    <span className="text-gray-400">Suspicious API Calls:</span>
+                    <span className={`ml-2 ${result.sandbox_analysis.suspicious_api_calls ? 'text-red-400' : 'text-green-400'}`}>
+                      {result.sandbox_analysis.suspicious_api_calls ? 'YES' : 'NO'}
+                    </span>
+                  </div>
+                </div>
+              </div>
+
+              {/* Final Report */}
+              <div className="bg-gray-800 rounded-lg p-6">
+                <h3 className="text-xl font-semibold mb-4 text-center">
+                  <i className="fas fa-file-alt mr-2"></i>
+                  Analysis Report
+                </h3>
+                <div className="text-center">
+                  <div className="mb-6">
+                    <span className="text-gray-400">Final Risk Score:</span>
+                    <span className={`text-3xl font-bold ml-2 ${getVerdictColor(result.sandbox_analysis.verdict)}`}>
+                      {result.sandbox_analysis.risk_score}/100
+                    </span>
+                  </div>
+                  <div className="mb-6">
+                    <span className="text-gray-400">Verdict:</span>
+                    <span className={`text-2xl font-bold ml-2 ${getVerdictColor(result.sandbox_analysis.verdict)}`}>
+                      {result.sandbox_analysis.verdict}
+                    </span>
+                  </div>
+                  <div className="mb-6">
+                    <span className="text-gray-400">Action Taken:</span>
+                    <span className="text-xl font-bold ml-2 text-blue-400">
+                      {result.sandbox_analysis.action}
+                    </span>
+                  </div>
+                  <div className="mt-8">
+                    <span className="text-gray-400">SHA256:</span>
+                    <span className="text-sm ml-2 font-mono">{result.static_analysis.sha256}</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+      );
+    };
+
+    const App = () => {
+      const [connected, setConnected] = useState(false);
+      const [threats, setThreats] = useState([]);
+      const [actions, setActions] = useState([]);
+      const [activeTab, setActiveTab] = useState('threats');
+
+      // WebSocket connection
+      useEffect(() => {
+        const ws = new WebSocket(WS_URL);
+        
+        ws.onopen = () => {
+          setConnected(true);
+          console.log('🔌 Connected to WebSocket');
+        };
+        
+        ws.onmessage = (event) => {
+          const data = JSON.parse(event.data);
+          
+          if (data.type === 'new_threat') {
+            const threat = data.data;
+            
+            // Generate SOAR action based on threat
+            const soarResult = generateSOARAction(threat);
+            
+            setThreats(prev => [threat, ...prev].slice(0, 50));
+            
+            if (soarResult.action !== 'MONITOR') {
+              setActions(prev => [soarResult, ...prev].slice(0, 100));
+            }
+          }
+        };
+        
+        ws.onclose = () => {
+          setConnected(false);
+          console.log('❌ Disconnected from WebSocket');
+        };
+        
+        ws.onerror = (error) => {
+          console.error('WebSocket error:', error);
+          setConnected(false);
+        };
+        
+        return () => ws.close();
+      }, []);
+
+      const generateSOARAction = (threat) => {
+        const confidence = threat.confidence || 0;
+        const reasons = threat.reason || [];
+        const volumetric = reasons.some(r => 
+          ['high_packets_per_second', 'syn_flood', 'ddos', 'port_sweep'].includes(r)
+        );
+        
+        let action, severity;
+        
+        if (confidence >= 0.90 || (confidence >= 0.85 && volumetric)) {
+          action = 'BLOCK';
+          severity = 'critical';
+        } else if (confidence >= 0.70 && volumetric) {
+          action = 'RATE_LIMIT';
+          severity = 'high';
+        } else if (confidence >= 0.75) {
+          action = 'RATE_LIMIT';
+          severity = 'medium';
+        } else if (confidence >= 0.60) {
+          action = 'MONITOR';
+          severity = 'low';
+        } else {
+          action = 'MONITOR';
+          severity = 'low';
+        }
+        
+        return {
+          id: Date.now() + Math.random(),
+          timestamp: new Date().toISOString(),
+          flowId: threat.flow_id,
+          attackType: threat.attack_type,
+          confidence: confidence,
+          action: action,
+          severity: severity,
+          automatic: true,
+          processingTime: Math.floor(Math.random() * 3000) + 2000,
+          details: {
+            reason: `Confidence: ${(confidence * 100).toFixed(1)}%`,
+            volumetric: volumetric,
+            trigger: confidence >= 0.85 ? 'High confidence' : 'Pattern detected'
+          }
+        };
+      };
+
+      const threatsCount = threats.length;
+      const actionsCount = actions.length;
+
+      return (
+        <div className="min-h-screen">
+          <Header 
+            connected={connected} 
+            threatsCount={threatsCount} 
+            actionsCount={actionsCount}
+            activeTab={activeTab}
+            setActiveTab={setActiveTab}
+          />
+          
+          <main className="container mx-auto p-6">
+            {activeTab === 'threats' ? (
+              <div className="text-center py-12">
+                <i className="fas fa-shield-virus text-6xl text-purple-500 mb-4"></i>
+                <h2 className="text-2xl font-bold mb-2">Threat Response Active</h2>
+                <p className="text-gray-400">Real-time threat detection and automated response</p>
+                <div className="mt-8 grid grid-cols-2 gap-8 max-w-2xl mx-auto">
+                  <div className="bg-gray-800 rounded-lg p-6">
+                    <div className="text-3xl font-bold text-blue-400">{threatsCount}</div>
+                    <div className="text-gray-400">Threats Detected</div>
+                  </div>
+                  <div className="bg-gray-800 rounded-lg p-6">
+                    <div className="text-3xl font-bold text-green-400">{actionsCount}</div>
+                    <div className="text-gray-400">Actions Taken</div>
+                  </div>
+                </div>
+              </div>
+            ) : (
+              <SandboxUpload />
+            )}
+          </main>
+        </div>
+      );
+    };
+
+    // Render the app
+    ReactDOM.render(<App />, document.getElementById('root'));
+  </script>
+</body>
+</html>

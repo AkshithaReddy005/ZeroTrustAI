@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Sandbox Upload Test</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-gray-900 text-white p-8">
+    <h1 class="text-2xl font-bold mb-4">Test File Upload to Sandbox</h1>
+    
+    <input type="file" id="fileInput" class="mb-4 p-2 bg-gray-800 rounded">
+    <br>
+    <button onclick="uploadFile()" class="bg-blue-600 hover:bg-blue-700 px-4 py-2 rounded">
+        Upload & Analyze
+    </button>
+    
+    <div id="result" class="mt-4 p-4 bg-gray-800 rounded"></div>
+
+    <script>
+        async function uploadFile() {
+            const fileInput = document.getElementById('fileInput');
+            const file = fileInput.files[0];
+            
+            if (!file) {
+                alert('Please select a file');
+                return;
+            }
+            
+            const formData = new FormData();
+            formData.append('file', file);
+            
+            try {
+                const response = await fetch('http://localhost:8001/analyze', {
+                    method: 'POST',
+                    body: formData
+                });
+                
+                const result = await response.json();
+                document.getElementById('result').innerHTML = `
+                    <h3 class="text-lg font-bold mb-2">Analysis Result:</h3>
+                    <pre class="text-sm bg-gray-900 p-2 rounded">${JSON.stringify(result, null, 2)}</pre>
+                `;
+            } catch (error) {
+                document.getElementById('result').innerHTML = `
+                    <div class="text-red-400">Error: ${error.message}</div>
+                `;
+            }
+        }
+    </script>
+</body>
+</html>
