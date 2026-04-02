@@ -16,6 +16,7 @@ import time
 from datetime import datetime, timedelta
 import random
 from dataclasses import dataclass
+from pathlib import Path
 import uvicorn
 
 app = FastAPI(title="ZeroTrust-AI Real-time SOC")
@@ -79,6 +80,85 @@ class ConnectionManager:
 
 manager = ConnectionManager()
 
+
+@app.post("/events/flow")
+async def ingest_flow_event(flow: Dict[str, Any]):
+    """Receive flow events from PCAP processor"""
+    manager.total_flows += 1
+    
+    # Broadcast flow update to all connected clients
+    await manager.broadcast(json.dumps({
+        "type": "flow_update",
+        "data": {
+            "flow_id": flow.get("flow_id", "unknown"),
+            "source_ip": flow.get("source_ip", ""),
+            "destination_ip": flow.get("destination_ip", ""),
+            "total_packets": flow.get("total_packets", 0),
+            "total_bytes": flow.get("total_bytes", 0),
+            "duration": flow.get("duration", 0),
+            "pps": flow.get("pps", 0),
+            "timestamp": datetime.now().isoformat(),
+        }
+    }))
+    
+    return {"status": "ok", "total_flows": manager.total_flows}
+
+@app.post("/events/threat")
+async def ingest_threat_event(threat_data: Dict[str, Any]):
+    """Receive threat events from PCAP processor"""
+    sev_raw = threat_data.get("severity", "medium")
+    sev_norm = (sev_raw or "medium").strip().lower()
+    if sev_norm not in ("low", "medium", "high", "critical"):
+        sev_norm = "medium"
+
+    threat = ThreatEvent(
+        flow_id=threat_data.get("flow_id", "unknown"),
+        label=threat_data.get("label", "unknown"),
+        confidence=threat_data.get("confidence", 0.0),
+        severity=sev_norm,
+        reason=threat_data.get("reason", []),
+        timestamp=threat_data.get("timestamp") or datetime.now().isoformat(),
+        attack_type=threat_data.get("attack_type"),
+        source_ip=threat_data.get("source_ip"),
+        destination_ip=threat_data.get("destination_ip"),
+        blocked=bool(threat_data.get("blocked", False)),
+    )
+    
+    # Classify attack type if not provided
+    if not threat.attack_type:
+        threat.attack_type = classify_attack_type(threat)
+    
+    # Auto-block high severity threats
+    if (not threat.blocked) and threat.severity in ('high', 'critical') and threat.confidence > 0.8:
+        threat.blocked = True
+        manager.blocked_flows.add(threat.flow_id)
+    
+    # Add to history
+    manager.threat_history.append(threat)
+    manager.total_flows += 1
+    
+    # Keep only last 1000 threats
+    if len(manager.threat_history) > 1000:
+        manager.threat_history = manager.threat_history[-1000:]
+    
+    # Broadcast to all connected clients
+    await manager.broadcast(json.dumps({
+        "type": "new_threat",
+        "data": {
+            "flow_id": threat.flow_id,
+            "label": threat.label,
+            "confidence": threat.confidence,
+            "severity": threat.severity,
+            "reason": threat.reason,
+            "timestamp": threat.timestamp,
+            "attack_type": threat.attack_type,
+            "source_ip": threat.source_ip,
+            "destination_ip": threat.destination_ip,
+            "blocked": threat.blocked
+        }
+    }))
+    
+    return {"status": "success", "threat_id": threat.flow_id, "blocked": threat.blocked}
 
 @app.post("/flow")
 async def ingest_flow(flow: Dict[str, Any]):
@@ -357,10 +437,13 @@ async def get_attack_stats():
 async def get_web_interface():
     """Serve main web interface"""
     try:
-        with open("../../../apps/web/index.html", "r", encoding="utf-8") as f:
+        # Get absolute path to the HTML file
+        current_dir = Path(__file__).parent
+        html_path = current_dir.parent.parent.parent / "apps" / "web" / "index.html"
+        with open(html_path, "r", encoding="utf-8") as f:
             return f.read()
     except FileNotFoundError:
-        return "<h1>Web interface not found. Run from project root.</h1>"
+        return "<h1>Web interface not found. HTML file missing.</h1>"
 
 # Simulation endpoint for testing
 @app.post("/simulate-threats")

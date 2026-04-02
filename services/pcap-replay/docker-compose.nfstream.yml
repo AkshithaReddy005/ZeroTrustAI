@@ -1,0 +1,60 @@
+version: '3.8'
+
+services:
+  # WebSocket Server for Dashboard
+  websocket-server:
+    build:
+      context: ../detector
+      dockerfile: app/websocket_server.Dockerfile
+    ports:
+      - "9000:9000"
+    environment:
+      - ZTA_DEMO_TRAFFIC=0
+    networks:
+      - zt-network
+    restart: unless-stopped
+
+  # NFStream PCAP Processor (Real-time)
+  pcap-processor-nfstream:
+    build:
+      context: .
+      dockerfile: Dockerfile.nfstream
+    environment:
+      - USE_CSV=false
+      - USE_NFSTREAM=true
+      - API_BASE_URL=http://websocket-server:8000
+      - WEBSOCKET_URL=ws://websocket-server:9000/ws
+      - PCAP_SOURCE=/data/raw
+      - THROTTLE_MS=100
+      - DEMO_MODE=true
+      - DEMO_RATE=0.1
+    volumes:
+      - ./data:/data:ro
+    networks:
+      - zt-network
+    depends_on:
+      - websocket-server
+    restart: unless-stopped
+
+  # Direct NFStream to WebSocket Bridge
+  nfstream-bridge:
+    build:
+      context: .
+      dockerfile: Dockerfile.bridge
+    environment:
+      - WEBSOCKET_URL=ws://websocket-server:9000/ws
+      - PCAP_SOURCE=/data/raw
+      - THROTTLE_MS=50
+      - DEMO_MODE=true
+      - DEMO_RATE=0.15
+    volumes:
+      - ./data:/data:ro
+    networks:
+      - zt-network
+    depends_on:
+      - websocket-server
+    restart: unless-stopped
+
+networks:
+  zt-network:
+    driver: bridge
