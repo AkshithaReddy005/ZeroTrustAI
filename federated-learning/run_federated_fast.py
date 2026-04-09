@@ -14,6 +14,9 @@ import numpy as np
 import logging
 from pathlib import Path
 import sys
+import requests
+import json
+from datetime import datetime
 
 # Add project root to path
 PROJECT_ROOT = Path(__file__).parent.parent
@@ -21,6 +24,7 @@ sys.path.append(str(PROJECT_ROOT))
 
 from c2_ddos.scripts.train_tcn import TCN
 from byzantine_detection import ByzantineDetector
+from meta_learning_byzantine import MetaLearningByzantineDetector
 
 logging.basicConfig(level=logging.INFO, format='%(message)s')
 logger = logging.getLogger(__name__)
@@ -34,6 +38,7 @@ class FastFederatedLearning:
         self.clients = {}
         self.global_model = None
         self.malicious_history = {}  # Track known malicious clients
+        self.dashboard_url = "http://localhost:9000/detect"  # Web dashboard endpoint
         self.f1_history = {  # Track F1 improvement over rounds
             'bank': [],
             'hospital': [], 
@@ -41,9 +46,17 @@ class FastFederatedLearning:
             'malicious': []
         }
         self.global_f1_history = []  # Track global model performance
+        # Use meta-learning instead of fixed Byzantine detector
+        self.meta_detector = MetaLearningByzantineDetector(
+            input_dim=4,      # acc, f1, similarity, round
+            meta_lr=0.01,     # Meta-learning rate
+            inner_lr=0.1      # Adaptation learning rate
+        )
+        
+        # Keep original for comparison
         self.detector = ByzantineDetector(
-            similarity_threshold=0.85,  # More sensitive for quick demo
-            deviation_threshold=0.8      # Lower threshold
+            similarity_threshold=0.7,   # Less aggressive - allow learning
+            deviation_threshold=1.5      # Higher threshold - less quarantining
         )
         
     def load_client_data(self):
@@ -92,8 +105,8 @@ class FastFederatedLearning:
             test_dataset = TensorDataset(X_test_tcn, torch.LongTensor(y_test))
             
             self.clients[client_id] = {
-                "train_loader": DataLoader(train_dataset, batch_size=64, shuffle=True),
-                "test_loader": DataLoader(test_dataset, batch_size=64, shuffle=False),
+                "train_loader": DataLoader(train_dataset, batch_size=32, shuffle=True),
+                "test_loader": DataLoader(test_dataset, batch_size=32, shuffle=False),
                 "scaler": scaler,
                 "description": config["description"],
                 "dataset_size": len(train_dataset)
@@ -109,7 +122,7 @@ class FastFederatedLearning:
         X_tcn = np.stack([lengths, iats], axis=1)
         return torch.tensor(X_tcn, dtype=torch.float32)
     
-    def train_client(self, client_id, epochs=1):  # FAST: Only 1 epoch
+    def train_client(self, client_id, epochs=3):  # FAST: Only 1 epoch
         """Train model on client data"""
         client = self.clients[client_id]
         model = TCN(input_channels=2, sequence_len=20).to(self.device)
@@ -117,7 +130,7 @@ class FastFederatedLearning:
             model.load_state_dict(self.global_model.state_dict())
         
         criterion = nn.BCEWithLogitsLoss()
-        optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+        optimizer = torch.optim.Adam(model.parameters(), lr=0.0005)
         
         model.train()
         for epoch in range(epochs):
@@ -172,7 +185,7 @@ class FastFederatedLearning:
         """Evaluate global model on holdout dataset - shows Master Brain performance"""
         if not hasattr(self, 'global_holdout'):
             self.global_holdout = self.create_global_holdout_dataset()
-            self.global_holdout_loader = DataLoader(self.global_holdout, batch_size=64, shuffle=False)
+            self.global_holdout_loader = DataLoader(self.global_holdout, batch_size=32, shuffle=False)
         
         global_accuracy, global_f1 = self.evaluate_model(self.global_model, self.global_holdout_loader)
         self.global_f1_history.append(global_f1)
@@ -229,6 +242,46 @@ class FastFederatedLearning:
         
         print(f"  📢 All clients updated with Master Brain v{round_num}")
     
+    def send_to_dashboard(self, client_id, accuracy, f1, trust_weight, status, round_num, is_malicious=False):
+        """Send federated learning results to web dashboard"""
+        try:
+            threat_data = {
+                "flow_id": f"federated-{client_id}-round-{round_num}",
+                "label": "MALICIOUS_CLIENT" if is_malicious else "HONEST_CLIENT",
+                "confidence": trust_weight / 2.0,  # Normalize to [0, 1]
+                "severity": "high" if is_malicious else "low",
+                "reason": [
+                    f"Federated Learning Round {round_num}",
+                    f"Client: {client_id}",
+                    f"Accuracy: {accuracy:.3f}",
+                    f"F1 Score: {f1:.3f}",
+                    f"Trust Weight: {trust_weight:.2f}",
+                    f"Status: {status}",
+                    "Meta-Learning Byzantine Detection"
+                ],
+                "timestamp": datetime.now().isoformat(),
+                "attack_type": "byzantine_attack" if is_malicious else "benign",
+                "source_ip": f"client-{client_id}",
+                "destination_ip": "global-model",
+                "blocked": is_malicious,
+                "federated_metrics": {
+                    "accuracy": accuracy,
+                    "f1_score": f1,
+                    "trust_weight": trust_weight,
+                    "round": round_num,
+                    "client_type": client_id,
+                    "meta_learning": True
+                }
+            }
+            
+            response = requests.post(self.dashboard_url, json=threat_data, timeout=5)
+            if response.status_code == 200:
+                logger.info(f"  Dashboard: {client_id} results sent successfully")
+            else:
+                logger.warning(f"  Dashboard: Failed to send {client_id} results")
+        except Exception as e:
+            logger.warning(f"  Dashboard: Error sending {client_id} results: {e}")
+    
     def cosine_similarity_weights(self, weights1, weights2):
         """Calculate cosine similarity between two weight dictionaries"""
         import torch
@@ -241,10 +294,10 @@ class FastFederatedLearning:
         cos_sim = torch.nn.functional.cosine_similarity(vec1.unsqueeze(0), vec2.unsqueeze(0))
         return cos_sim.item()
     
-    def calculate_dynamic_trust(self, client_id, client_weights, global_weights_prev, metrics):
+    def calculate_dynamic_trust(self, client_id, client_weights, global_weights_prev, metrics, round_num):
         """
-        REAL-TIME ZERO TRUST SCORING (No Hardcoding)
-        Dynamic trust calculation based on performance and behavior
+        META-LEARNING ZERO TRUST SCORING (Adaptive)
+        Dynamic trust calculation using meta-learning instead of fixed rules
         """
         f1 = metrics.get('f1', 0)
         acc = metrics.get('acc', 0)
@@ -252,28 +305,24 @@ class FastFederatedLearning:
         # Calculate cosine similarity to global consensus
         sim = self.cosine_similarity_weights(client_weights, global_weights_prev)
         
-        # DYNAMIC WEIGHTING LOGIC (The "Brain")
-        if acc < 0.55 and f1 < 0.05:
-            # POTENTIAL POISONER: Rapidly drop trust
-            trust_weight = 0.05 
-            status = "🚨 QUARANTINED (High Noise/Poison)"
-        elif f1 < 0.3:
-            # STRUGGLING NODE: Give lower weight until it learns
-            trust_weight = 0.5
-            status = "⚠️ OBSERVATION (Low Performance)"
-        elif f1 > 0.85:
-            # EXPERT NODE: Reward high-quality contributions
-            trust_weight = 1.5
-            status = "✅ TRUSTED EXPERT"
-        else:
-            # BASELINE
-            trust_weight = 1.0
-            status = "✅ VERIFIED"
-            
+        # Use meta-learning for adaptive trust scoring
+        trust_weight = self.meta_detector.compute_trust_weight(metrics, round_num)
+        status = self.meta_detector.get_adaptive_status(trust_weight)
+        
+        # Add experience for meta-learning
+        if client_id in self.f1_history and len(self.f1_history[client_id]) > 0:
+            previous_f1 = self.f1_history[client_id][-1]
+            improvement = f1 - previous_f1
+            self.meta_detector.add_experience(metrics, round_num, improvement)
+        
+        # Perform meta-update every 3 rounds
+        if round_num % 3 == 0 and len(self.meta_detector.experience_buffer) > 5:
+            self.meta_detector.meta_update(self.meta_detector.experience_buffer)
+        
         return trust_weight, status, sim
     
-    def fedavg_aggregate(self, client_weights, client_sizes, client_metrics):
-        """FedAvg aggregation with Dynamic Trust Scoring (Production Ready)"""
+    def fedavg_aggregate(self, client_weights, client_sizes, client_metrics, round_num=1):
+        """FedAvg aggregation with Meta-Learning Trust Scoring (Adaptive)"""
         # Convert lists to dictionaries with client IDs
         client_ids = ["bank", "hospital", "tech", "malicious"]
         client_weights_dict = dict(zip(client_ids, client_weights))
@@ -282,16 +331,16 @@ class FastFederatedLearning:
         # Get previous global weights for comparison
         global_weights_prev = self.global_model.state_dict() if self.global_model else None
         
-        # Apply Dynamic Trust Scoring
+        # Apply Meta-Learning Trust Scoring
         adjusted_weights = []
         adjusted_sizes = []
         trust_scores = {}
         
-        print(f"      🧠 DYNAMIC TRUST SCORING (Zero Trust PDP):")
+        print(f"      META-LEARNING TRUST SCORING (Adaptive PDP):")
         
         for client_id, weights, size, metrics in zip(client_ids, client_weights, client_sizes, client_metrics):
             trust_weight, status, similarity = self.calculate_dynamic_trust(
-                client_id, weights, global_weights_prev, metrics
+                client_id, weights, global_weights_prev, metrics, round_num
             )
             
             adjusted_size = size * trust_weight
@@ -384,7 +433,8 @@ class FastFederatedLearning:
             global_weights = self.fedavg_aggregate(
                 list(client_weights.values()), 
                 list(client_sizes.values()),
-                [{'acc': 0.5, 'f1': 0.0}] * 4  # Placeholder metrics for initial aggregation
+                [{'acc': 0.5, 'f1': 0.0}] * 4,  # Placeholder metrics for initial aggregation
+                round_num
             )
             self.global_model.load_state_dict(global_weights)
             
@@ -399,12 +449,13 @@ class FastFederatedLearning:
                 status = " MALICIOUS" if accuracy < 0.55 and f1 < 0.05 else " HONEST"
                 print(f"  {client_id:<12} Acc: {accuracy:.3f} F1: {f1:.3f} {status}")
             
-            # Re-aggregate with Dynamic Trust Scoring using real metrics
-            print(f"\n Dynamic Trust Aggregation (Zero Trust PDP)...")
+            # Re-aggregate with Meta-Learning Trust Scoring using real metrics
+            print(f"\n Meta-Learning Trust Aggregation (Adaptive PDP)...")
             global_weights = self.fedavg_aggregate(
                 list(client_weights.values()), 
                 list(client_sizes.values()),
-                client_metrics
+                client_metrics,
+                round_num
             )
             self.global_model.load_state_dict(global_weights)
             
@@ -414,8 +465,8 @@ class FastFederatedLearning:
             # Broadcast global model back to clients - PDP to PEP
             self.broadcast_global_model(round_num)
             
-            # Byzantine detection
-            print(f"\n🔍 Detection Summary:")
+            # Byzantine detection with dashboard integration
+            print(f"\nDetection Summary:")
             malicious_count = 0
             for client_id in self.clients.keys():
                 model = TCN(input_channels=2, sequence_len=20).to(self.device)
@@ -424,6 +475,10 @@ class FastFederatedLearning:
                 
                 # Track F1 history for trend analysis
                 self.f1_history[client_id].append(f1)
+                
+                # Get trust weight and status from meta-learning
+                trust_weight = self.meta_detector.compute_trust_weight({'acc': accuracy, 'f1': f1}, round_num)
+                status = self.meta_detector.get_adaptive_status(trust_weight)
                 
                 # Pure behavioral detection - no hardcoding!
                 was_previously_malicious = (client_id in self.malicious_history)
@@ -436,29 +491,24 @@ class FastFederatedLearning:
                         self.f1_history[client_id][0] + 0.01
                     )
                 
-                # Malicious = near random accuracy AND F1 never improving AND near-zero F1
-                has_inverted_patterns = (
-                    abs(accuracy - 0.5) < 0.05 and 
-                    not f1_improving and
-                    f1 < 0.05 and
-                    round_num >= 2
-                )
-                
                 # Round 1: Zero-trust nuanced detection
                 if round_num == 1:
                     # Hard sample detection - be more lenient with hospital
                     if f1 < 0.1 and accuracy < 0.6:
                         if client_id == "hospital":
-                            print(f"  ⚠️ {client_id}: LOW_CONFIDENCE (Hard Sample Category)")
+                            print(f"  {client_id}: LOW_CONFIDENCE (Hard Sample Category)")
                             print(f"      → Hospital: C2 is 'needle in haystack' - applying reduced weight (0.1)")
                             # Don't flag as malicious, just note low confidence
+                            is_malicious = False
                         else:
-                            print(f"  🚨 {client_id}: MALICIOUS DETECTED")
+                            print(f"  {client_id}: MALICIOUS DETECTED")
                             print(f"      → Round 1: Low F1 ({f1:.3f}) + Low accuracy ({accuracy:.3f})")
                             self.malicious_history[client_id] = True
                             malicious_count += 1
+                            is_malicious = True
                     else:
-                        print(f"  ✅ {client_id}: HONEST (Acc: {accuracy:.3f}, F1: {f1:.3f}) - Round 1 baseline")
+                        print(f"  {client_id}: HONEST (Acc: {accuracy:.3f}, F1: {f1:.3f}) - Round 1 baseline")
+                        is_malicious = False
                 else:
                     # Allow redemption: If F1 improves significantly, clear malicious status
                     redeemed = (
@@ -469,26 +519,33 @@ class FastFederatedLearning:
                     
                     if redeemed:
                         self.malicious_history.pop(client_id, None)  # Remove from blacklist
-                        print(f"  ✅ {client_id}: HONEST (REDEEMED) - F1 improvement: {self.f1_history[client_id][0]:.3f}→{f1:.3f}")
+                        print(f"  {client_id}: HONEST (REDEEMED) - F1 improvement: {self.f1_history[client_id][0]:.3f}={f1:.3f}")
+                        is_malicious = False
                     elif has_inverted_patterns:
-                        print(f"  🚨 {client_id}: MALICIOUS DETECTED")
-                        print(f"      → F1 not improving ({self.f1_history[client_id][0]:.3f}→{self.f1_history[client_id][-1]:.3f}) + random accuracy")
+                        print(f"  {client_id}: MALICIOUS DETECTED")
+                        print(f"      → F1 not improving ({self.f1_history[client_id][0]:.3f}={self.f1_history[client_id][-1]:.3f}) + random accuracy")
                         self.malicious_history[client_id] = True
                         malicious_count += 1
+                        is_malicious = True
                     elif was_previously_malicious:
-                        print(f"  🚨 {client_id}: MALICIOUS DETECTED")
+                        print(f"  {client_id}: MALICIOUS DETECTED")
                         print(f"      → Previously flagged - STILL MALICIOUS")
                         malicious_count += 1
+                        is_malicious = True
                     else:
                         improvement = ""
                         if len(self.f1_history[client_id]) >= 2:
-                            improvement = f" (F1: {self.f1_history[client_id][0]:.3f}→{self.f1_history[client_id][-1]:.3f})"
-                        print(f"  ✅ {client_id}: HONEST (Acc: {accuracy:.3f}, F1: {f1:.3f}){improvement}")
+                            improvement = f" (F1: {self.f1_history[client_id][0]:.3f}={self.f1_history[client_id][-1]:.3f})"
+                        print(f"  {client_id}: HONEST (Acc: {accuracy:.3f}, F1: {f1:.3f}){improvement}")
+                        is_malicious = False
+                
+                # Send results to dashboard
+                self.send_to_dashboard(client_id, accuracy, f1, trust_weight, status, round_num, is_malicious)
             
-            print(f"\n📈 Round {round_num}: {malicious_count} malicious client(s) detected")
+            print(f"\nRound {round_num}: {malicious_count} malicious client(s) detected")
         
         print("\n" + "="*60)
-        print("🏁 FAST EXPERIMENT COMPLETE")
+        print(" FAST EXPERIMENT COMPLETE")
         print("="*60)
 
 
@@ -496,7 +553,7 @@ def main():
     """Main execution"""
     demo = FastFederatedLearning()
     demo.load_client_data()
-    demo.run_fast_experiment(num_rounds=3)
+    demo.run_fast_experiment(num_rounds=10)
 
 
 if __name__ == "__main__":

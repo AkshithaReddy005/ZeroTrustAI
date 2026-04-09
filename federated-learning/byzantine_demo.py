@@ -419,8 +419,8 @@ def main():
     demo.load_client_data()
     
     # Run both aggregation methods
-    fedavg_hist = demo.run_federated_rounds("fedavg", rounds=5)
-    fedmedian_hist = demo.run_federated_rounds("fedmedian", rounds=5)
+    fedavg_hist = demo.run_federated_rounds("fedavg", rounds=10)
+    fedmedian_hist = demo.run_federated_rounds("fedmedian", rounds=10)
 
     results_dir = PROJECT_ROOT / "federated-learning" / "results"
     results_dir.mkdir(parents=True, exist_ok=True)
