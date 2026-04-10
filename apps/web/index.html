@@ -463,9 +463,9 @@
       const blockedFlows = (metrics && typeof metrics.blocked_flows === 'number')
         ? metrics.blocked_flows
         : (aggregates.blocked_flows ?? 0);
-      const accuracyVal = (metrics && typeof metrics.accuracy === 'number')
-        ? metrics.accuracy
-        : (aggregates.observed_accuracy != null ? aggregates.observed_accuracy : null);
+      const metaAucVal = (metrics && typeof metrics.meta_fuser_auc === 'number')
+        ? metrics.meta_fuser_auc
+        : null;
 
       return (
         <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-6">
@@ -473,11 +473,137 @@
           <MetricCard icon="fa-exclamation-triangle" title="Threats Detected" value={threatsDetected} color="text-red-400" />
           <MetricCard icon="fa-ban" title="Blocked" value={blockedFlows} color="text-orange-400" />
           <MetricCard
-            icon="fa-bullseye"
-            title="Accuracy"
-            value={accuracyVal != null ? `${Math.round(accuracyVal * 100)}%` : '—'}
+            icon="fa-brain"
+            title="Meta-Fuser AUC (Offline)"
+            value={metaAucVal != null ? metaAucVal.toFixed(3) : '—'}
             color="text-green-400"
           />
+        </div>
+      );
+    };
+
+    const _toPct = (x) => {
+      const v = Number(x);
+      if (!Number.isFinite(v)) return null;
+      const clamped = Math.max(0, Math.min(1, v));
+      return Math.round(clamped * 100);
+    };
+
+    const ScoreBar = ({ label, value, color }) => {
+      const pct = _toPct(value);
+      const w = pct == null ? 0 : pct;
+      return (
+        <div className="space-y-1">
+          <div className="flex justify-between text-xs text-gray-300">
+            <span>{label}</span>
+            <span className="text-gray-400">{pct == null ? '—' : `${pct}%`}</span>
+          </div>
+          <div className="h-2 bg-gray-900/60 rounded border border-gray-700 overflow-hidden">
+            <div className={`h-2 ${color}`} style={{ width: `${w}%` }}></div>
+          </div>
+        </div>
+      );
+    };
+
+    const getLensScores = (t) => {
+      // Support:
+      // - normalized events (we spread raw into normalized, so metadata should exist)
+      // - websocket wrappers {type,timestamp,data:{...}}
+      // - legacy shapes
+      const obj = (t && t.data && typeof t.data === 'object') ? t.data : t;
+
+      // Prefer metadata at current level; fallback to raw.metadata if UI wraps differently
+      const md0 = (obj && obj.metadata && typeof obj.metadata === 'object') ? obj.metadata : null;
+      const md1 = (obj && obj.raw && obj.raw.metadata && typeof obj.raw.metadata === 'object') ? obj.raw.metadata : null;
+      const md = md0 || md1 || {};
+
+      const tcn = md.tcn_score ?? md.tcn ?? md.tcn_s ?? md.tcnScore ?? md.tcn_score_prob ?? null;
+      const ae = md.ae_score ?? md.ae ?? md.ae_s ?? md.aeScore ?? null;
+      const iso = md.iso_score ?? md.iso ?? md.iso_s ?? md.if ?? md.if_score ?? md.ifScore ?? null;
+      const fused = obj?.risk_score ?? obj?.confidence ?? md.ens ?? md.ensemble ?? md.meta_fused ?? null;
+
+      // Debug hook (non-fatal)
+      try {
+        window.__ztai_last_lens = { sample: obj, metadata: md, lens: { tcn, ae, iso, fused } };
+      } catch (e) {}
+
+      return { tcn, ae, iso, fused };
+    };
+
+    const LensesDecisionTable = ({ events }) => {
+      const sorted = [...events].sort((a, b) => new Date(b.timestamp || Date.now()) - new Date(a.timestamp || Date.now()));
+      const rows = sorted.slice(0, 6);
+      return (
+        <div className="bg-gray-800 rounded-lg border border-gray-700 p-4">
+          <h3 className="text-lg font-semibold mb-3 flex items-center">
+            <i className="fas fa-eye text-green-400 mr-2"></i>
+            Three Lenses — Inference Breakdown (PDP)
+          </h3>
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="text-gray-400 border-b border-gray-700">
+                  <th className="text-left py-2 pr-2">Flow ID</th>
+                  <th className="text-right py-2 px-2">Temporal Lens (TCN)</th>
+                  <th className="text-right py-2 px-2">Structural Lens (AE)</th>
+                  <th className="text-right py-2 px-2">Outlier Lens (IF)</th>
+                  <th className="text-right py-2 pl-2">Meta-Fused Trust Score</th>
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((t, idx) => {
+                  const s = getLensScores(t);
+                  const tcnPct = _toPct(s.tcn);
+                  const aePct = _toPct(s.ae);
+                  const isoPct = _toPct(s.iso);
+                  const fusedPct = _toPct(s.fused);
+                  const flowShort = String(t.flow_id || '—');
+                  const showId = flowShort.length > 36 ? `${flowShort.slice(0, 36)}…` : flowShort;
+                  return (
+                    <tr key={idx} className="border-b border-gray-700/50">
+                      <td className="py-2 pr-2 text-gray-200" title={flowShort}>{showId}</td>
+                      <td className="py-2 px-2 text-right text-blue-300">{tcnPct == null ? '—' : `${tcnPct}%`}</td>
+                      <td className="py-2 px-2 text-right text-purple-300">{aePct == null ? '—' : `${aePct}%`}</td>
+                      <td className="py-2 px-2 text-right text-orange-300">{isoPct == null ? '—' : `${isoPct}%`}</td>
+                      <td className="py-2 pl-2 text-right font-semibold text-green-300">{fusedPct == null ? '—' : `${fusedPct}%`}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+          <div className="mt-3 text-xs text-gray-400">
+            PDP = Policy Decision Point (Meta-Fuser). Lenses: Temporal (TCN), Structural (AE), Outlier (Isolation Forest).
+          </div>
+        </div>
+      );
+    };
+
+    const CurrentFlowBreakdown = ({ events }) => {
+      const sorted = [...events].sort((a, b) => new Date(b.timestamp || Date.now()) - new Date(a.timestamp || Date.now()));
+      const t = sorted[0] || null;
+      const s = t ? getLensScores(t) : { tcn: null, ae: null, iso: null, fused: null };
+      const flowId = t?.flow_id ? String(t.flow_id) : '—';
+      const fusedPct = _toPct(s.fused);
+      const verdict = fusedPct != null && fusedPct >= 50 ? 'Malicious' : 'Benign';
+      return (
+        <div className="bg-gray-800 rounded-lg border border-gray-700 p-4">
+          <h3 className="text-lg font-semibold mb-3 flex items-center">
+            <i className="fas fa-microscope text-blue-400 mr-2"></i>
+            Current Flow — Live Lens Scores
+          </h3>
+          <div className="text-xs text-gray-400 truncate mb-3" title={flowId}>Flow: {flowId}</div>
+          <div className="space-y-3">
+            <ScoreBar label="Temporal Lens (TCN)" value={s.tcn} color="bg-blue-500" />
+            <ScoreBar label="Structural Lens (AE)" value={s.ae} color="bg-purple-500" />
+            <ScoreBar label="Outlier Lens (Isolation Forest)" value={s.iso} color="bg-orange-500" />
+            <div className="pt-2 border-t border-gray-700">
+              <div className="flex justify-between items-center">
+                <div className="text-sm text-gray-200">PDP Meta-Fused Trust Score</div>
+                <div className="text-sm font-semibold text-green-300">{fusedPct == null ? '—' : `${fusedPct}%`} ({verdict})</div>
+              </div>
+            </div>
+          </div>
         </div>
       );
     };
@@ -940,21 +1066,37 @@
             <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
               <div className="lg:col-span-2"><ThreatFeed events={events} /></div>
               <div className="space-y-6">
+                <CurrentFlowBreakdown events={events} />
                 <ChartCard title="Threat Timeline"><TimelineChart timeline={aggregates.timeline_points} /></ChartCard>
                 <ChartCard title="Severity Distribution"><SeverityChart severityCounts={aggregates.severity_counts} /></ChartCard>
               </div>
             </div>
+            <div className="mt-6">
+              <LensesDecisionTable events={events} />
+            </div>
+
             <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 mt-6">
-              <div className="lg:col-span-1">
+              <div className="bg-gray-800 rounded-lg border border-gray-700 p-4">
+                <h3 className="text-lg font-semibold mb-3 flex items-center">
+                  <i className="fas fa-th text-green-400 mr-2"></i>Model Health (Last 15 min)
+                </h3>
+                <ConfusionMatrix confusionMatrix={aggregates.confusion_matrix} />
+              </div>
+              <div className="lg:col-span-1 space-y-6">
                 <AttackTypes attackTypes={aggregates.attack_types} />
-              </div>
-              <div className="lg:col-span-1">
-                <ChartCard title="Confusion Matrix">
-                  <ConfusionMatrix confusionMatrix={aggregates.confusion_matrix} />
-                </ChartCard>
-              </div>
-              <div className="lg:col-span-1">
                 <TrafficComposition protocolCounts={aggregates.protocol_counts} />
+              </div>
+              <div className="lg:col-span-1">
+                <TopList
+                  title="Top Reasons (Last 15 min)"
+                  items={aggregates.top_reasons}
+                  renderItem={(r) => (
+                    <>
+                      <span className="truncate max-w-xs">{r.reason}</span>
+                      <span className="text-xs text-gray-400">{r.count}</span>
+                    </>
+                  )}
+                />
               </div>
             </div>
             <SoarActionsPanel actions={aggregates.soar_actions} />

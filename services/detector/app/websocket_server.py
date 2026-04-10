@@ -6,14 +6,16 @@ Provides live threat detection with attack classification and real-time blocking
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.responses import HTMLResponse, FileResponse
-from fastapi.staticfiles import StaticFiles
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from typing import List, Dict, Any
+from pydantic import BaseModel
+from typing import List, Dict, Any, Optional
 import json
 import asyncio
-import os
-import time
 from datetime import datetime, timedelta
+
+import os
+from pathlib import Path
 import random
 from dataclasses import dataclass
 import uvicorn
@@ -316,7 +318,8 @@ async def detect_threat(threat_data: Dict[str, Any]):
             "attack_type": threat.attack_type,
             "source_ip": threat.source_ip,
             "destination_ip": threat.destination_ip,
-            "blocked": threat.blocked
+            "blocked": threat.blocked,
+            "metadata": threat_data.get("metadata"),
         }
     }))
     
@@ -394,7 +397,9 @@ async def get_threats(limit: int = 50):
             "attack_type": t.attack_type,
             "source_ip": t.source_ip,
             "destination_ip": t.destination_ip,
-            "blocked": t.blocked
+            "blocked": t.blocked,
+            # metadata is not stored on ThreatEvent (dataclass) today; expose from stored events if available
+            "metadata": None,
         }
         for t in manager.threat_history[-limit:]
     ]
@@ -422,12 +427,31 @@ async def get_metrics():
             return False
         now = datetime.now(dt.tzinfo) if dt.tzinfo is not None else datetime.now()
         return dt > now - timedelta(minutes=1)
+
+    # Real-time accuracy cannot be computed without ground-truth labels.
+    # Provide offline meta-fuser performance if the artifact exists.
+    meta_fuser_auc: Optional[float] = None
+    try:
+        repo_root = Path(__file__).resolve().parents[3]
+        meta_path = repo_root / "c2_ddos" / "scripts" / "models" / "meta_fuser.joblib"
+        if meta_path.exists():
+            import joblib
+
+            artifact = joblib.load(meta_path)
+            # If artifact dict contains auc, surface it; otherwise leave None
+            if isinstance(artifact, dict):
+                auc = artifact.get("auc")
+                if isinstance(auc, (int, float)):
+                    meta_fuser_auc = float(auc)
+    except Exception:
+        meta_fuser_auc = None
     
     return {
         "total_flows": total_flows,
         "threats_detected": malicious_count,
         "blocked_flows": blocked_count,
-        "accuracy": 0.94,  # From your evaluation
+        "accuracy": None,
+        "meta_fuser_auc": meta_fuser_auc,
         "active_connections": len(manager.active_connections),
         "attack_types": attack_counts,
         "recent_threats_per_minute": len([
