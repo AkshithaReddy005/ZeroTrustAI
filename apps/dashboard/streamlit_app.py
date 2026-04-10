@@ -9,7 +9,7 @@ import numpy as np
 import hashlib
 from datetime import datetime, timedelta
 
-API_BASE = os.getenv("API_BASE_URL", "http://localhost:8000")
+API_BASE = os.getenv("API_BASE_URL", "http://localhost:9000")
 DEMO_MODE = os.getenv("DEMO_MODE", "true").lower() == "true"
 
 
