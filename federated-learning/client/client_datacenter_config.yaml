@@ -1,0 +1,23 @@
+data:
+  data_path: data/client_datacenter_data.csv
+  random_state: 42
+  test_size: 0.2
+federated:
+  batch_size: 32
+  learning_rate: 0.001
+  local_epochs: 3
+  loss_function: cross_entropy
+  optimizer: adam
+model:
+  hidden_size: 64
+  input_size: 12
+  num_classes: 2
+  sequence_length: 50
+server:
+  host: localhost
+  port: 5000
+  protocol: http
+training:
+  device: auto
+  log_interval: 10
+  save_local_models: true

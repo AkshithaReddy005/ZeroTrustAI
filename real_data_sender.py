@@ -10,6 +10,8 @@ Uses production models from c2_ddos/scripts/models/:
 """
 
 import sys, os, time, random, requests
+import socket
+import dpkt
 import numpy as np
 import pandas as pd
 import torch
@@ -17,6 +19,7 @@ import torch.nn as nn
 import joblib
 from pathlib import Path
 from datetime import datetime, timezone
+import argparse
 
 WS_SERVER    = "http://localhost:9000"
 # Production models are in c2_ddos/scripts/models/
@@ -26,6 +29,10 @@ DELAY        = 0.8
 THREAT_RATIO = 0.4
 SEQ_LEN      = 20
 
+META_FUSER_PATH = MODEL_DIR / "meta_fuser.joblib"
+
+RAW_PCAP_DIR = REPO_ROOT / "data" / "raw"
+
 CSV_CANDIDATES = [
     str(REPO_ROOT / "data" / "processed" / "phase1_processed.csv"),
     str(REPO_ROOT / "data" / "processed" / "final_balanced_240k.csv"),
@@ -33,7 +40,6 @@ CSV_CANDIDATES = [
     str(REPO_ROOT / "data" / "processed" / "balanced_train_200k_v2.csv"),
     str(REPO_ROOT / "data" / "processed" / "balanced_train_400k.csv"),
 ]
-
 
 # ── PRODUCTION MODEL ARCHITECTURES (matching c2_ddos/scripts/train_tcn.py) ────
 
@@ -142,6 +148,26 @@ def load_models():
         m["weights"] = {"tcn": 0.9, "ae": 0.1, "if": 0.0}
         m["threshold"] = 0.45
 
+    # Optional stacking meta-fuser (learned fusion)
+    m["meta_fuser"] = None
+    m["meta_fuser_threshold"] = 0.5
+    m["meta_fuser_features"] = ["tcn", "ae", "iso"]
+    try:
+        if META_FUSER_PATH.exists():
+            artifact = joblib.load(META_FUSER_PATH)
+            if isinstance(artifact, dict) and "model" in artifact:
+                m["meta_fuser"] = artifact.get("model")
+                m["meta_fuser_threshold"] = float(artifact.get("threshold", 0.5))
+                m["meta_fuser_features"] = list(artifact.get("features", ["tcn", "ae", "iso"]))
+            else:
+                m["meta_fuser"] = artifact
+            print(f"✅ Meta-fuser  → {META_FUSER_PATH.name}  threshold={m['meta_fuser_threshold']}")
+        else:
+            print("ℹ️  Meta-fuser  → not found (using weight-based fusion)")
+    except Exception as e:
+        print(f"⚠️  Meta-fuser load failed: {e} (using weight-based fusion)")
+        m["meta_fuser"] = None
+
     return m, None  # device not needed (production fns handle it)
 
 
@@ -207,9 +233,211 @@ def score_row(row, m, device):
         except Exception:
             iso_s = 0.5
 
-    # Ensemble with calibrated weights (TCN=0.9, AE=0.1, IF=0.0)
-    conf = tcn_s * w["tcn"] + ae_s * w["ae"] + iso_s * w.get("if", 0.0)
+    # Meta-fuser (stacking) if available; else fallback to weight-based fusion
+    conf = None
+    meta = m.get("meta_fuser")
+    if meta is not None:
+        try:
+            X_meta = np.array([[float(tcn_s), float(ae_s), float(iso_s)]], dtype=np.float32)
+            if hasattr(meta, "predict_proba"):
+                conf = float(meta.predict_proba(X_meta)[0, 1])
+            elif hasattr(meta, "decision_function"):
+                z = float(meta.decision_function(X_meta)[0])
+                conf = float(1.0 / (1.0 + np.exp(-z)))
+            else:
+                conf = None
+        except Exception:
+            conf = None
+
+    if conf is None:
+        conf = tcn_s * w["tcn"] + ae_s * w["ae"] + iso_s * w.get("if", 0.0)
+
     return tcn_s, ae_s, iso_s, float(np.clip(conf, 0, 1))
+
+
+def _ip_to_str(ip_raw):
+    try:
+        if isinstance(ip_raw, bytes):
+            return socket.inet_ntop(socket.AF_INET, ip_raw)
+        return str(ip_raw)
+    except Exception:
+        return ""
+
+
+def _extract_pcap_flows_splt(pcap_path: Path, seq_len: int):
+    flows = {}
+    try:
+        with open(pcap_path, "rb") as f:
+            pcap = dpkt.pcap.Reader(f)
+            for ts, buf in pcap:
+                try:
+                    eth = dpkt.ethernet.Ethernet(buf)
+                    ip = eth.data
+                    if not hasattr(ip, "p"):
+                        continue
+
+                    proto = int(ip.p)
+                    l4 = ip.data
+                    src = dpkt.utils.inet_to_str(ip.src)
+                    dst = dpkt.utils.inet_to_str(ip.dst)
+                    sport = int(getattr(l4, "sport", 0) or 0)
+                    dport = int(getattr(l4, "dport", 0) or 0)
+                    key = f"{src}:{sport}->{dst}:{dport}/{proto}"
+
+                    rec = flows.setdefault(
+                        key,
+                        {
+                            "flow_id": key,
+                            "src_ip": src,
+                            "dst_ip": dst,
+                            "src_port": sport,
+                            "dst_port": dport,
+                            "protocol": proto,
+                            "first_ts": ts,
+                            "last_ts": ts,
+                            "total_packets": 0,
+                            "total_bytes": 0,
+                            "lens": [],
+                            "iat": [],
+                            "_last_pkt_ts": None,
+                        },
+                    )
+
+                    rec["total_packets"] += 1
+                    rec["total_bytes"] += int(len(buf))
+                    rec["last_ts"] = ts
+
+                    if len(rec["lens"]) < seq_len:
+                        rec["lens"].append(float(len(buf)))
+                        if rec["_last_pkt_ts"] is None:
+                            rec["_last_pkt_ts"] = ts
+                        else:
+                            if len(rec["iat"]) < seq_len:
+                                rec["iat"].append(float(ts - rec["_last_pkt_ts"]))
+                            rec["_last_pkt_ts"] = ts
+                except Exception:
+                    continue
+    except Exception as e:
+        print(f"❌ Failed to read PCAP {pcap_path}: {e}")
+        return []
+
+    rows = []
+    for rec in flows.values():
+        dur = float(rec["last_ts"] - rec["first_ts"]) if rec["last_ts"] and rec["first_ts"] else 0.0
+        dur = max(dur, 1e-6)
+        pkts = int(rec["total_packets"])
+        byts = int(rec["total_bytes"])
+        pps = float(pkts / dur)
+
+        lens = list(rec["lens"])[:seq_len]
+        iat = list(rec["iat"])[:seq_len]
+
+        while len(lens) < seq_len:
+            lens.append(0.0)
+        while len(iat) < seq_len:
+            iat.append(0.0)
+
+        row = {
+            "flow_id": rec["flow_id"],
+            "src_ip": rec["src_ip"],
+            "dst_ip": rec["dst_ip"],
+            "src_port": rec["src_port"],
+            "dst_port": rec["dst_port"],
+            "protocol": rec["protocol"],
+            "duration": dur,
+            "total_packets": pkts,
+            "total_bytes": byts,
+            "pps": pps,
+        }
+
+        for i in range(seq_len):
+            row[f"splt_len_{i+1}"] = lens[i]
+            row[f"splt_iat_{i+1}"] = iat[i]
+
+        rows.append(row)
+
+    return rows
+
+
+def _stream_from_pcaps(m, device, delay: float, max_flows: int):
+    if not RAW_PCAP_DIR.exists():
+        print(f"❌ PCAP folder missing: {RAW_PCAP_DIR}")
+        return
+
+    pcaps = sorted(list(RAW_PCAP_DIR.glob("*.pcap")) + list(RAW_PCAP_DIR.glob("*.pcapng")))
+    if not pcaps:
+        print(f"❌ No PCAP files found in {RAW_PCAP_DIR}")
+        return
+
+    sent = 0
+    threats = 0
+    benign = 0
+
+    print(f"📁 {len(pcaps)} PCAP files")
+    print("🚀 Streaming PCAP → SPLT → 3-model ensemble → /detect — Ctrl+C to stop")
+
+    for pcap_path in pcaps:
+        print(f"📂 Processing PCAP: {pcap_path.name}")
+        rows = _extract_pcap_flows_splt(pcap_path, SEQ_LEN)
+        for row in rows:
+            if max_flows and sent >= max_flows:
+                break
+
+            tcn_s, ae_s, iso_s, conf = score_row(row, m, device)
+
+            is_mal = conf >= float(m.get("threshold", 0.45))
+            sev = "critical" if conf >= 0.85 else ("high" if conf >= 0.60 else ("medium" if conf >= 0.45 else "low"))
+
+            payload = {
+                "flow_id": str(row.get("flow_id")),
+                "label": "malicious" if is_mal else "benign",
+                "confidence": float(conf),
+                "severity": sev,
+                "reason": ["tcn_malicious" if tcn_s >= 0.7 else "tcn_benign", "ae_anomalous" if ae_s >= 0.7 else "ae_normal"],
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "attack_type": "malicious" if is_mal else "benign",
+                "source_ip": row.get("src_ip"),
+                "destination_ip": row.get("dst_ip"),
+                "total_packets": int(row.get("total_packets", 0) or 0),
+                "total_bytes": int(row.get("total_bytes", 0) or 0),
+                "duration": float(row.get("duration", 0.0) or 0.0),
+                "pps": float(row.get("pps", 0.0) or 0.0),
+                "avg_entropy": None,
+                "blocked": bool(is_mal and conf >= 0.85),
+                "metadata": {
+                    "tcn": float(tcn_s),
+                    "ae": float(ae_s),
+                    "iso": float(iso_s),
+                    "ens": float(conf),
+                    "weights": dict(m.get("weights", {})),
+                    "meta_fuser": bool(m.get("meta_fuser") is not None),
+                    "meta_fuser_threshold": float(m.get("meta_fuser_threshold", 0.5)),
+                    "pcap": pcap_path.name,
+                },
+            }
+
+            try:
+                r = requests.post(f"{WS_SERVER}/detect", json=payload, timeout=5)
+                ok = r.status_code in (200, 201)
+            except Exception:
+                ok = False
+
+            sent += 1
+            if is_mal:
+                threats += 1
+            else:
+                benign += 1
+
+            icon = "🚨" if is_mal else "🌐"
+            status = "✅" if ok else "❌"
+            print(f"{icon} {sent:>5} {status} {payload['label']:<9} {tcn_s:6.3f} {ae_s:6.3f} {iso_s:6.3f} {conf:6.3f}  {sev.upper():<8} {payload['flow_id'][:48]}")
+
+            time.sleep(delay)
+
+        if max_flows and sent >= max_flows:
+            break
+
+    print(f"\n📊 {sent} sent | {threats} threats | {benign} benign")
 
 
 # ── HELPERS ───────────────────────────────────────────────────────────────────
@@ -339,6 +567,12 @@ def build_event(row, at, tcn_s, ae_s, iso_s, conf):
 # ── MAIN ──────────────────────────────────────────────────────────────────────
 
 def main():
+    parser = argparse.ArgumentParser(description="Stream CSV or PCAP data through the production ensemble")
+    parser.add_argument("--pcap", action="store_true", help="Stream from data/raw/*.pcap instead of CSV")
+    parser.add_argument("--delay", type=float, default=DELAY, help="Delay between sends (seconds)")
+    parser.add_argument("--max", type=int, default=0, help="Max flows to send (0 = unlimited)")
+    args = parser.parse_args()
+
     print("="*65)
     print("  ZeroTrust-AI — REAL ML ENSEMBLE INFERENCE")
     print("="*65)
@@ -355,6 +589,11 @@ def main():
     n = sum(1 for k in ["tcn","ae","iso"] if m.get(k))
     print(f"\n{'✅' if n==3 else '⚠️'} {n}/3 models loaded")
     if n==0: print("❌ No models"); sys.exit(1)
+
+    # Prefer PCAP mode if requested and pcaps exist
+    if args.pcap:
+        _stream_from_pcaps(m, device, delay=float(args.delay), max_flows=int(args.max or 0))
+        return
 
     csv_path = next((p for p in CSV_CANDIDATES if os.path.exists(p)), None)
     if not csv_path: print("❌ No CSV found"); sys.exit(1)

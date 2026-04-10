@@ -1,10 +1,10 @@
 federated:
-  aggregation_strategy: fedavg
+  aggregation_strategy: median
   learning_rate: 0.001
   local_epochs: 3
-  max_clients: 3
+  max_clients: 4
   min_clients: 2
-  rounds: 3
+  rounds: 5
 model:
   hidden_size: 64
   input_size: 12

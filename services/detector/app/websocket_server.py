@@ -52,6 +52,8 @@ class ConnectionManager:
     def __init__(self):
         self.active_connections: List[WebSocket] = []
         self.threat_history: List[ThreatEvent] = []
+        self.events: List[Dict[str, Any]] = []
+        self.decisions: List[Dict[str, Any]] = []
         self.blocked_flows: set = set()
         self.total_flows: int = 0
 
@@ -245,10 +247,61 @@ async def detect_threat(threat_data: Dict[str, Any]):
     # Add to history
     manager.threat_history.append(threat)
     manager.total_flows += 1
+
+    # Record Streamlit-compatible events
+    evt_ts = threat.timestamp or datetime.now().isoformat()
+    flow_evt = {
+        "type": "flow",
+        "timestamp": evt_ts,
+        "data": {
+            "flow_id": threat.flow_id,
+            "source_ip": threat.source_ip,
+            "destination_ip": threat.destination_ip,
+            "total_packets": threat_data.get("total_packets"),
+            "total_bytes": threat_data.get("total_bytes"),
+            "duration": threat_data.get("duration"),
+            "pps": threat_data.get("pps"),
+            "avg_entropy": threat_data.get("avg_entropy"),
+        },
+    }
+    threat_evt = {
+        "type": "threat",
+        "timestamp": evt_ts,
+        "data": {
+            "flow_id": threat.flow_id,
+            "label": threat.label,
+            "confidence": threat.confidence,
+            "severity": threat.severity,
+            "reason": threat.reason,
+            "attack_type": threat.attack_type,
+            "source_ip": threat.source_ip,
+            "destination_ip": threat.destination_ip,
+            "blocked": threat.blocked,
+            "metadata": threat_data.get("metadata"),
+        },
+    }
+    manager.events.append(flow_evt)
+    manager.events.append(threat_evt)
+
+    # Create a lightweight decision object for the UI
+    decision = {
+        "timestamp": evt_ts,
+        "flow_id": threat.flow_id,
+        "tier": "QUARANTINE" if threat.blocked or threat.severity in ("high", "critical") else ("MONITOR" if threat.severity == "medium" else "ALLOW"),
+        "action": "Block + SOAR alert" if threat.blocked else ("Allow + elevated telemetry" if threat.severity == "medium" else "Standard pass-through"),
+        "risk_score": float(threat.confidence or 0.0),
+    }
+    manager.decisions.append(decision)
     
     # Keep only last 1000 threats
     if len(manager.threat_history) > 1000:
         manager.threat_history = manager.threat_history[-1000:]
+
+    # Keep only last N events/decisions
+    if len(manager.events) > 5000:
+        manager.events = manager.events[-5000:]
+    if len(manager.decisions) > 5000:
+        manager.decisions = manager.decisions[-5000:]
     
     # Broadcast to all connected clients
     await manager.broadcast(json.dumps({
@@ -268,6 +321,22 @@ async def detect_threat(threat_data: Dict[str, Any]):
     }))
     
     return {"status": "success", "threat_id": threat.flow_id, "blocked": threat.blocked}
+
+
+@app.get("/events")
+async def get_events(limit: int = 500):
+    """Streamlit dashboard consumes /events."""
+    if limit <= 0:
+        return []
+    return manager.events[-limit:]
+
+
+@app.get("/decisions")
+async def get_decisions(limit: int = 500):
+    """Streamlit dashboard consumes /decisions."""
+    if limit <= 0:
+        return []
+    return manager.decisions[-limit:]
 
 @app.post("/threats")
 async def receive_threat_event(threat_data: Dict[str, Any]):
