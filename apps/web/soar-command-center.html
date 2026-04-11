@@ -145,7 +145,7 @@
           </div>
         </div>
         <div className="flex gap-1">
-          {[['threats','shield-virus','Threat Response'],['sandbox','vial','Sandbox Analysis']].map(([id, icon, label]) => (
+          {[['threats','shield-virus','Threat Response'],['sandbox','vial','Sandbox Analysis'],['rules','plus-circle','Add Rule']].map(([id, icon, label]) => (
             <button key={id} onClick={() => setActiveTab(id)}
               className={`px-4 py-2 rounded-t-lg font-medium text-sm transition-colors ${
                 activeTab === id
@@ -530,6 +530,151 @@
       );
     };
 
+    /* ─── Rules Management ─────────────────────────────────── */
+    const RulesManagement = () => {
+      const [rules, setRules] = useState([
+        { id: 1, name: 'Block High-Risk IPs', condition: 'confidence > 0.9', action: 'BLOCK', enabled: true },
+        { id: 2, name: 'Rate Limit DDoS', condition: 'pps > 1000', action: 'RATE_LIMIT', enabled: true },
+        { id: 3, name: 'Monitor Suspicious', condition: 'confidence > 0.7', action: 'MONITOR', enabled: false }
+      ]);
+      const [showAddForm, setShowAddForm] = useState(false);
+      const [newRule, setNewRule] = useState({ name: '', condition: '', action: 'BLOCK' });
+
+      const addRule = () => {
+        if (newRule.name && newRule.condition) {
+          setRules([...rules, { ...newRule, id: Date.now(), enabled: true }]);
+          setNewRule({ name: '', condition: '', action: 'BLOCK' });
+          setShowAddForm(false);
+        }
+      };
+
+      const toggleRule = (id) => {
+        setRules(rules.map(r => r.id === id ? { ...r, enabled: !r.enabled } : r));
+      };
+
+      const deleteRule = (id) => {
+        setRules(rules.filter(r => r.id !== id));
+      };
+
+      return (
+        <div className="space-y-6">
+          <div className="flex justify-between items-center">
+            <h2 className="text-lg font-semibold text-gray-300 flex items-center gap-2">
+              <i className="fas fa-plus-circle text-purple-400"></i>
+              Rules Management
+            </h2>
+            <button
+              onClick={() => setShowAddForm(true)}
+              className="bg-purple-600 hover:bg-purple-700 px-4 py-2 rounded-lg text-sm flex items-center gap-2 transition-colors"
+            >
+              <i className="fas fa-plus"></i>
+              Add New Rule
+            </button>
+          </div>
+
+          {showAddForm && (
+            <div className="bg-gray-800 border border-gray-700 rounded-xl p-6">
+              <h3 className="text-md font-semibold mb-4">Create New Rule</h3>
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                <input
+                  type="text"
+                  placeholder="Rule Name"
+                  value={newRule.name}
+                  onChange={(e) => setNewRule({...newRule, name: e.target.value})}
+                  className="bg-gray-900 border border-gray-600 rounded-lg px-3 py-2 text-white"
+                />
+                <input
+                  type="text"
+                  placeholder="Condition (e.g., confidence > 0.8)"
+                  value={newRule.condition}
+                  onChange={(e) => setNewRule({...newRule, condition: e.target.value})}
+                  className="bg-gray-900 border border-gray-600 rounded-lg px-3 py-2 text-white"
+                />
+                <select
+                  value={newRule.action}
+                  onChange={(e) => setNewRule({...newRule, action: e.target.value})}
+                  className="bg-gray-900 border border-gray-600 rounded-lg px-3 py-2 text-white"
+                >
+                  <option value="BLOCK">Block</option>
+                  <option value="RATE_LIMIT">Rate Limit</option>
+                  <option value="ISOLATE">Isolate</option>
+                  <option value="MONITOR">Monitor</option>
+                </select>
+              </div>
+              <div className="flex gap-2 mt-4">
+                <button
+                  onClick={addRule}
+                  className="bg-green-600 hover:bg-green-700 px-4 py-2 rounded text-sm transition-colors"
+                >
+                  <i className="fas fa-check mr-2"></i>Save Rule
+                </button>
+                <button
+                  onClick={() => setShowAddForm(false)}
+                  className="bg-gray-600 hover:bg-gray-700 px-4 py-2 rounded text-sm transition-colors"
+                >
+                  <i className="fas fa-times mr-2"></i>Cancel
+                </button>
+              </div>
+            </div>
+          )}
+
+          <div className="space-y-3">
+            {rules.map(rule => (
+              <div key={rule.id} className={`bg-gray-800 border rounded-lg p-4 ${rule.enabled ? 'border-gray-600' : 'border-gray-700 opacity-60'}`}>
+                <div className="flex justify-between items-center">
+                  <div className="flex-1">
+                    <div className="flex items-center gap-3">
+                      <h4 className="font-semibold text-white">{rule.name}</h4>
+                      <span className={`px-2 py-1 rounded text-xs font-bold ${
+                        rule.action === 'BLOCK' ? 'bg-red-600' :
+                        rule.action === 'RATE_LIMIT' ? 'bg-orange-600' :
+                        rule.action === 'ISOLATE' ? 'bg-purple-600' : 'bg-blue-600'
+                      }`}>
+                        {rule.action}
+                      </span>
+                      {rule.enabled && (
+                        <span className="px-2 py-1 bg-green-600 rounded text-xs">ACTIVE</span>
+                      )}
+                    </div>
+                    <div className="text-sm text-gray-400 mt-1">
+                      Condition: <code className="bg-gray-900 px-2 py-1 rounded text-xs">{rule.condition}</code>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={() => toggleRule(rule.id)}
+                      className={`px-3 py-1 rounded text-sm transition-colors ${
+                        rule.enabled 
+                          ? 'bg-yellow-600 hover:bg-yellow-700 text-white' 
+                          : 'bg-green-600 hover:bg-green-700 text-white'
+                      }`}
+                    >
+                      <i className={`fas fa-${rule.enabled ? 'pause' : 'play'}`}></i>
+                      {rule.enabled ? 'Disable' : 'Enable'}
+                    </button>
+                    <button
+                      onClick={() => deleteRule(rule.id)}
+                      className="bg-red-600 hover:bg-red-700 px-3 py-1 rounded text-sm text-white transition-colors"
+                    >
+                      <i className="fas fa-trash"></i>
+                    </button>
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+
+          {rules.length === 0 && (
+            <div className="text-center py-12 text-gray-500">
+              <i className="fas fa-shield-alt text-5xl mb-3"></i>
+              <p>No rules configured</p>
+              <p className="text-xs mt-1">Click "Add New Rule" to create your first rule</p>
+            </div>
+          )}
+        </div>
+      );
+    };
+
     /* ─── App ─────────────────────────────────────────────── */
     const App = () => {
       const [connected,        setConnected]        = useState(false);
@@ -641,8 +786,10 @@
                 {/* Metrics */}
                 <MetricsPanel threats={threats} actions={actions} />
               </div>
-            ) : (
+            ) : activeTab === 'sandbox' ? (
               <SandboxUpload />
+            ) : (
+              <RulesManagement />
             )}
           </main>
         </div>

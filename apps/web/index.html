@@ -7,7 +7,29 @@
   <title>🛡️ ZeroTrust-AI SOC (React)</title>
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" />
   <script src="https://cdn.tailwindcss.com"></script>
-  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <script>
+    (function () {
+      function loadScript(src) {
+        return new Promise(function (resolve, reject) {
+          var s = document.createElement('script');
+          s.src = src;
+          s.async = true;
+          s.onload = resolve;
+          s.onerror = reject;
+          document.head.appendChild(s);
+        });
+      }
+
+      // Chart.js can fail to load on network hiccups. Try multiple CDNs.
+      window.__chartReady = loadScript('https://cdn.jsdelivr.net/npm/chart.js')
+        .catch(function () {
+          return loadScript('https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js');
+        })
+        .catch(function () {
+          return loadScript('https://unpkg.com/chart.js@4.4.1/dist/chart.umd.js');
+        });
+    })();
+  </script>
   <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
   <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
@@ -46,7 +68,7 @@
 
     // --- Risk-based normalization and aggregation helpers ---
 
-    const ROLLING_WINDOW_MINUTES = 15;
+    const ROLLING_WINDOW_MINUTES = 60;
 
     const deriveDetectionEngine = (reasons) => {
       const text = (reasons || []).join(' ').toLowerCase();
@@ -210,10 +232,6 @@
           severity_counts[e.risk_band] += 1;
         }
 
-        if (e.attack_type) {
-          attack_type_counts[e.attack_type] = (attack_type_counts[e.attack_type] || 0) + 1;
-        }
-
         const src = e.source_ip || parseSourceFromFlowId(e.flow_id);
         if (src) {
           src_counts[src] = (src_counts[src] || 0) + 1;
@@ -317,16 +335,16 @@
         }
       });
 
-      // Confusion matrix: label (ground truth) vs ML prediction (0.45 threshold)
+      // Confusion matrix: ground_truth (metadata) vs predicted label (label field)
       let tp = 0, tn = 0, fp = 0, fn = 0;
       events.forEach(e => {
         const ts = new Date(e.timestamp || Date.now()).getTime();
         if (!Number.isFinite(ts) || now - ts > windowMs) return;
-        const actual_mal = (e.label || '').toLowerCase() === 'malicious';
+        const actual_mal = (e.metadata?.ground_truth || '').toLowerCase() === 'malicious';
         // Use same 0.45 threshold as normalizeEvent for consistency
         const risk_score = typeof e.risk_score === 'number' ? e.risk_score : 
                           (typeof e.confidence === 'number' ? e.confidence : 0);
-        const pred_mal = risk_score >= 0.45;
+        const pred_mal = (e.label || '').toLowerCase() === 'malicious';
         if (actual_mal && pred_mal)        tp++;
         else if (!actual_mal && !pred_mal) tn++;
         else if (!actual_mal && pred_mal)  fp++;
@@ -349,8 +367,7 @@
       const top_reasons = toTopArray(reason_counts, 'reason');
       const mitre_tactics = toTopArray(mitre_counts, 'tactic');
 
-      const attack_types = attack_type_counts;
-      const timeline_points = buildTimeline(events);
+            const timeline_points = buildTimeline(events);
 
       // Keep SOAR actions rare and intentional: cap to top 3 by risk_score
       const final_soar_actions = soar_actions
@@ -365,7 +382,6 @@
         observed_accuracy,
         confusion_matrix,
         severity_counts,
-        attack_types,
         timeline_points,
         top_sources,
         top_dest_ports,
@@ -546,7 +562,7 @@
                   <th className="text-left py-2 pr-2">Flow ID</th>
                   <th className="text-right py-2 px-2">Temporal Lens (TCN)</th>
                   <th className="text-right py-2 px-2">Structural Lens (AE)</th>
-                  <th className="text-right py-2 px-2">Outlier Lens (IF)</th>
+                  <th className="text-right py-2 px-2">Outlier Lens (GAN)</th>
                   <th className="text-right py-2 pl-2">Meta-Fused Trust Score</th>
                 </tr>
               </thead>
@@ -573,7 +589,7 @@
             </table>
           </div>
           <div className="mt-3 text-xs text-gray-400">
-            PDP = Policy Decision Point (Meta-Fuser). Lenses: Temporal (TCN), Structural (AE), Outlier (Isolation Forest).
+            PDP = Policy Decision Point (Meta-Fuser). Lenses: Temporal (TCN), Structural (AE), Outlier (GAN).
           </div>
         </div>
       );
@@ -596,7 +612,7 @@
           <div className="space-y-3">
             <ScoreBar label="Temporal Lens (TCN)" value={s.tcn} color="bg-blue-500" />
             <ScoreBar label="Structural Lens (AE)" value={s.ae} color="bg-purple-500" />
-            <ScoreBar label="Outlier Lens (Isolation Forest)" value={s.iso} color="bg-orange-500" />
+            <ScoreBar label="Outlier Lens (GAN)" value={s.iso} color="bg-orange-500" />
             <div className="pt-2 border-t border-gray-700">
               <div className="flex justify-between items-center">
                 <div className="text-sm text-gray-200">PDP Meta-Fused Trust Score</div>
@@ -661,8 +677,7 @@
                       <span className="font-semibold">{t.is_malicious ? 'malicious' : 'benign'}</span>
                     </div>
                     <div><span className="text-gray-400">Risk Score:</span> {Math.round(((t.risk_score || 0) || 0) * 100)}%</div>
-                    <div><span className="text-gray-400">Attack:</span> {t.attack_type || '—'}</div>
-                    <div><span className="text-gray-400">Blocked:</span> {t.blocked ? 'Yes' : 'No'}</div>
+                                        <div><span className="text-gray-400">Blocked:</span> {t.blocked ? 'Yes' : 'No'}</div>
                   </div>
                   {engine && (
                     <div className="mt-1 text-xs text-blue-300">
@@ -791,28 +806,6 @@
       );
     };
 
-    const AttackTypes = ({ attackTypes }) => {
-      const types = attackTypes || {};
-      const entries = Object.entries(types);
-      return (
-        <div className="bg-gray-800 rounded-lg border border-gray-700 p-4">
-          <h3 className="text-lg font-semibold mb-3 flex items-center"><i className="fas fa-bug text-red-500 mr-2"></i>Attack Types Detected</h3>
-          {entries.length === 0 ? (
-            <p className="text-sm text-gray-400">No attack types detected yet</p>
-          ) : (
-            <div className="grid grid-cols-2 gap-3">
-              {entries.map(([k, v]) => (
-                <div key={k} className="bg-gray-700 rounded p-3 text-center">
-                  <p className="text-sm font-semibold capitalize">{k.replace('_', ' ')}</p>
-                  <p className="text-xs text-gray-300">{v} detected</p>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-      );
-    };
-
     const TopList = ({ title, items, renderItem }) => (
       <div className="bg-gray-800 rounded-lg border border-gray-700 p-4">
         <h3 className="text-lg font-semibold mb-3 flex items-center">
@@ -906,6 +899,16 @@
     );
 
     const TrafficComposition = ({ protocolCounts }) => {
+      if (typeof Chart === 'undefined') {
+        return (
+          <div className="bg-gray-800 rounded-lg border border-gray-700 p-4">
+            <h3 className="text-lg font-semibold mb-3 flex items-center">
+              <i className="fas fa-lock text-blue-400 mr-2"></i>Traffic Composition (Last 15 min)
+            </h3>
+            <p className="text-sm text-gray-400">Charts unavailable (Chart.js failed to load).</p>
+          </div>
+        );
+      }
       const tls = protocolCounts?.tls || 0;
       const quic = protocolCounts?.quic || 0;
       const plain = protocolCounts?.plain || 0;
@@ -1083,8 +1086,7 @@
                 <ConfusionMatrix confusionMatrix={aggregates.confusion_matrix} />
               </div>
               <div className="lg:col-span-1 space-y-6">
-                <AttackTypes attackTypes={aggregates.attack_types} />
-                <TrafficComposition protocolCounts={aggregates.protocol_counts} />
+                                <TrafficComposition protocolCounts={aggregates.protocol_counts} />
               </div>
               <div className="lg:col-span-1">
                 <TopList
