@@ -144,14 +144,19 @@ def train_isolation_forest(
     train_df = df.iloc[train_idx].reset_index(drop=True)
     val_df   = df.iloc[val_idx].reset_index(drop=True)
 
-    X_train = get_volumetric_matrix(train_df)
+    # --- THE FIX ---
+    # Filter so the model ONLY sees Benign (label 0) during training
+    train_df_benign = train_df[train_df['label'] == 0] 
+    X_train_benign = get_volumetric_matrix(train_df_benign)
+
     X_val   = get_volumetric_matrix(val_df)
     y_val   = y_all[val_idx]
 
     benign_val    = X_val[y_val == 0]
     malicious_val = X_val[y_val == 1]
 
-    logger.info(f"Train: {len(X_train):,} | Val benign: {len(benign_val):,} | Val malicious: {len(malicious_val):,}")
+    logger.info(f"Training IF on {len(X_train_benign)} BENIGN samples only.")
+    logger.info(f"Val benign: {len(benign_val):,} | Val malicious: {len(malicious_val):,}")
 
     # ─────────────────────────────────────────────
     # CONTAMINATION SWEEP
@@ -168,7 +173,7 @@ def train_isolation_forest(
             random_state=random_state,
             n_jobs=-1
         )
-        iforest.fit(X_train)
+        iforest.fit(X_train_benign)  # Train ONLY on benign data
 
         # IF returns -1 for anomaly, 1 for normal → convert to 0/1
         val_preds_raw = iforest.predict(X_val)
