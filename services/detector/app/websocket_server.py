@@ -8,12 +8,14 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.responses import HTMLResponse, FileResponse
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
-from typing import List, Dict, Any, Optional
 import json
 import asyncio
 from datetime import datetime, timedelta
-
+from typing import List, Dict, Any
+from redis_storage import redis_storage
+from influxdb_storage import influx_storage
 import os
 from pathlib import Path
 import random
@@ -108,6 +110,9 @@ class ConnectionManager:
             self.disconnect(conn)
 
 manager = ConnectionManager()
+# Clear old data to start fresh with fixed metrics
+manager.threat_history.clear()
+manager.total_flows = 0
 
 
 @app.post("/flow")
@@ -295,9 +300,29 @@ async def detect_threat(threat_data: Dict[str, Any]):
     }
     manager.decisions.append(decision)
     
-    # Keep only last 1000 threats
-    if len(manager.threat_history) > 1000:
-        manager.threat_history = manager.threat_history[-1000:]
+    # Store in history
+    manager.threat_history.append(threat)
+    if len(manager.threat_history) > 100:
+        manager.threat_history = manager.threat_history[-100:]
+    
+    # Store in Redis for persistence
+    event_data = {
+        "flow_id": threat.flow_id,
+        "label": threat.label,
+        "confidence": threat.confidence,
+        "severity": threat.severity,
+        "reason": threat.reason,
+        "timestamp": threat.timestamp,
+        "attack_type": threat.attack_type,
+        "source_ip": threat.source_ip,
+        "destination_ip": threat.destination_ip,
+        "blocked": threat.blocked,
+        "metadata": threat_data.get("metadata", {})
+    }
+    redis_storage.store_event(event_data)
+    
+    # Store in InfluxDB for time-series analytics
+    influx_storage.store_event(event_data)
 
     # Keep only last N events/decisions
     if len(manager.events) > 5000:
@@ -405,12 +430,46 @@ async def get_threats(limit: int = 50):
     ]
     return threats
 
+@app.get("/redis/threats")
+async def get_redis_threats(limit: int = 100):
+    """Get threats from Redis persistent storage"""
+    return redis_storage.get_recent_events(limit)
+
+@app.get("/redis/metrics")
+async def get_redis_metrics():
+    """Get aggregated metrics from Redis"""
+    return redis_storage.get_metrics()
+
+@app.get("/influx/threats")
+async def get_influx_threats(limit: int = 100):
+    """Get threats from InfluxDB time-series storage"""
+    return influx_storage.get_recent_events(limit)
+
+@app.get("/influx/metrics")
+async def get_influx_metrics(time_range: str = "-1h"):
+    """Get aggregated metrics from InfluxDB"""
+    return influx_storage.get_metrics(time_range)
+
+@app.get("/influx/timeseries")
+async def get_influx_timeseries(measurement: str = "threat_event", field: str = "confidence", time_range: str = "-1h"):
+    """Get time series data for charts"""
+    return influx_storage.get_time_series(measurement, field, time_range)
+
 @app.get("/metrics")
 async def get_metrics():
     """Get system metrics"""
-    total_flows = manager.total_flows
+    # Count unique flows to avoid double-counting
+    unique_flows = set()
+    for threat in manager.threat_history:
+        unique_flows.add(threat.flow_id)
+    
+    total_flows = len(unique_flows)
     malicious_count = len([t for t in manager.threat_history if t.label == 'malicious'])
     blocked_count = len([t for t in manager.threat_history if t.blocked])
+    
+    # Ensure counts are logical
+    threats_detected = min(malicious_count, total_flows)
+    blocked_flows = min(blocked_count, threats_detected)
     
     # Attack type distribution
     attack_counts = {}
@@ -448,8 +507,8 @@ async def get_metrics():
     
     return {
         "total_flows": total_flows,
-        "threats_detected": malicious_count,
-        "blocked_flows": blocked_count,
+        "threats_detected": threats_detected,
+        "blocked_flows": blocked_flows,
         "accuracy": None,
         "meta_fuser_auc": meta_fuser_auc,
         "active_connections": len(manager.active_connections),
