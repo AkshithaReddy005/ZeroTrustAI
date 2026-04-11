@@ -21,6 +21,29 @@ from pathlib import Path
 from datetime import datetime, timezone
 import argparse
 
+from gan_discriminator_inference import load_gan_discriminator, gan_scores_from_rows
+
+# Define FusionMLP class so joblib can find it when loading
+class FusionMLP(nn.Module):
+    """MLP model for meta-fusion (matches training architecture)"""
+    def __init__(self, input_dim: int):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(input_dim, 32),
+            nn.BatchNorm1d(32),
+            nn.ReLU(),
+            nn.Dropout(0.3),
+            nn.Linear(32, 16),
+            nn.ReLU(),
+            nn.Dropout(0.2),
+            nn.Linear(16, 8),
+            nn.ReLU(),
+            nn.Linear(8, 1),
+        )
+
+    def forward(self, x):
+        return self.net(x)  # logits
+
 WS_SERVER    = "http://localhost:9000"
 # Production models are in c2_ddos/scripts/models/
 REPO_ROOT    = Path(__file__).resolve().parent
@@ -30,15 +53,14 @@ THREAT_RATIO = 0.4
 SEQ_LEN      = 20
 
 META_FUSER_PATH = MODEL_DIR / "meta_fuser.joblib"
+HIERARCHICAL_META_FUSER_PATH = MODEL_DIR / "hierarchical_meta_fuser_gan.joblib"
 
 RAW_PCAP_DIR = REPO_ROOT / "data" / "raw"
 
 CSV_CANDIDATES = [
-    str(REPO_ROOT / "data" / "processed" / "phase1_processed.csv"),
-    str(REPO_ROOT / "data" / "processed" / "final_balanced_240k.csv"),
-    str(REPO_ROOT / "data" / "processed" / "splt_features_labeled.csv"),
-    str(REPO_ROOT / "data" / "processed" / "balanced_train_200k_v2.csv"),
-    str(REPO_ROOT / "data" / "processed" / "balanced_train_400k.csv"),
+    str(REPO_ROOT / "data" / "processed" / "meta_fusion_test_unseen.csv"),  # PROPER TEST DATA - COMPLETELY UNSEEN
+    str(REPO_ROOT / "data" / "processed" / "demo_test_data_240k.csv"),       # Backup option
+    str(REPO_ROOT / "data" / "processed" / "splt_features_labeled.csv"),     # Last resort
 ]
 
 # ── PRODUCTION MODEL ARCHITECTURES (matching c2_ddos/scripts/train_tcn.py) ────
@@ -137,6 +159,20 @@ def load_models():
     except Exception as e:
         print(f"⚠️  IF: {e}"); m["iso"] = None
 
+    # GAN Discriminator Lens
+    m["gan"] = None
+    try:
+        gan_bundle = load_gan_discriminator(MODEL_DIR)
+        if gan_bundle is not None:
+            m["gan"] = gan_bundle
+            print("✅ GAN Lens   → gan_discriminator_lens.pth")
+            print(f"   threshold={gan_bundle['threshold']:.3f}")
+        else:
+            print("ℹ️  GAN Lens   → not found")
+    except Exception as e:
+        print(f"⚠️  GAN Lens load failed: {e}")
+        m["gan"] = None
+
     # Ensemble config
     try:
         ens = joblib.load(MODEL_DIR / "ensemble_config.pkl")
@@ -151,14 +187,14 @@ def load_models():
     # Optional stacking meta-fuser (learned fusion)
     m["meta_fuser"] = None
     m["meta_fuser_threshold"] = 0.5
-    m["meta_fuser_features"] = ["tcn", "ae", "iso"]
+    m["meta_fuser_features"] = ["tcn", "ae", "gan"]
     try:
         if META_FUSER_PATH.exists():
             artifact = joblib.load(META_FUSER_PATH)
             if isinstance(artifact, dict) and "model" in artifact:
                 m["meta_fuser"] = artifact.get("model")
                 m["meta_fuser_threshold"] = float(artifact.get("threshold", 0.5))
-                m["meta_fuser_features"] = list(artifact.get("features", ["tcn", "ae", "iso"]))
+                m["meta_fuser_features"] = list(artifact.get("features", ["tcn", "ae", "gan"]))
             else:
                 m["meta_fuser"] = artifact
             print(f"✅ Meta-fuser  → {META_FUSER_PATH.name}  threshold={m['meta_fuser_threshold']}")
@@ -168,10 +204,30 @@ def load_models():
         print(f"⚠️  Meta-fuser load failed: {e} (using weight-based fusion)")
         m["meta_fuser"] = None
 
-    return m, None  # device not needed (production fns handle it)
-
-
-# ── FEATURE EXTRACTION + INFERENCE ───────────────────────────────────────────
+    # Hierarchical Meta-Fusion (Zero Trust PDP)
+    m["hierarchical_meta_fuser"] = None
+    try:
+        import sys
+        sys.path.insert(0, str(REPO_ROOT))
+        from hierarchical_meta_fuser_inference_gan import load_hierarchical_meta_fuser
+        
+        hierarchical_fuser = load_hierarchical_meta_fuser(MODEL_DIR)
+        if hierarchical_fuser:
+            m["hierarchical_meta_fuser"] = hierarchical_fuser
+            print(f"✅ Hierarchical Meta-Fuser → {HIERARCHICAL_META_FUSER_PATH.name}")
+            print(f"   Architecture: Two-stage Zero Trust PDP (MLP)")
+            print(f"   Stage 1: Anomaly Expert (AE + GAN consensus)")
+            print(f"   Stage 2: Zero Trust Fusion (TCN + Anomaly Expert) via MLP")
+            print(f"   Optimized Threshold: {hierarchical_fuser.threshold:.2f}")
+        else:
+            print("ℹ️  Hierarchical Meta-Fuser → not found (using simple meta-fuser)")
+    except Exception as e:
+        print(f"⚠️  Hierarchical Meta-Fuser load failed: {e}")
+        m["hierarchical_meta_fuser"] = None
+    
+    # Return models and device
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    return m, device
 
 def score_row(row, m, device):
     """Score a single row using production model APIs."""
@@ -233,26 +289,52 @@ def score_row(row, m, device):
         except Exception:
             iso_s = 0.5
 
-    # Meta-fuser (stacking) if available; else fallback to weight-based fusion
-    conf = None
-    meta = m.get("meta_fuser")
-    if meta is not None:
+    gan_real = 0.5
+    gan_attack = 0.5
+    if m.get("gan") is not None:
         try:
-            X_meta = np.array([[float(tcn_s), float(ae_s), float(iso_s)]], dtype=np.float32)
-            if hasattr(meta, "predict_proba"):
-                conf = float(meta.predict_proba(X_meta)[0, 1])
-            elif hasattr(meta, "decision_function"):
-                z = float(meta.decision_function(X_meta)[0])
-                conf = float(1.0 / (1.0 + np.exp(-z)))
-            else:
-                conf = None
+            Xg = pd.DataFrame([dict(row)])
+            gan_real_arr, gan_attack_arr = gan_scores_from_rows(Xg, m["gan"])
+            gan_real = float(gan_real_arr[0])
+            gan_attack = float(gan_attack_arr[0])
         except Exception:
+            gan_real = 0.5
+            gan_attack = 0.5
+
+    # Hierarchical Meta-Fusion (Zero Trust PDP) - Priority over simple meta-fuser
+    conf = None
+    hierarchical_outputs = None
+    hierarchical_fuser = m.get("hierarchical_meta_fuser")
+    if hierarchical_fuser is not None:
+        try:
+            conf, stage_outputs = hierarchical_fuser.predict(tcn_s, ae_s, gan_attack)
+            # Store hierarchical outputs for metadata
+            hierarchical_outputs = stage_outputs
+        except Exception as e:
+            print(f"   Hierarchical meta-fuser error: {e}")
             conf = None
-
+    
+    # Fallback to simple meta-fuser if hierarchical fails
     if conf is None:
-        conf = tcn_s * w["tcn"] + ae_s * w["ae"] + iso_s * w.get("if", 0.0)
+        meta = m.get("meta_fuser")
+        if meta is not None:
+            try:
+                X_meta = np.array([[float(tcn_s), float(ae_s), float(gan_attack)]], dtype=np.float32)
+                if hasattr(meta, "predict_proba"):
+                    conf = float(meta.predict_proba(X_meta)[0, 1])
+                elif hasattr(meta, "decision_function"):
+                    z = float(meta.decision_function(X_meta)[0])
+                    conf = float(1.0 / (1.0 + np.exp(-z)))
+                else:
+                    conf = None
+            except Exception:
+                conf = None
 
-    return tcn_s, ae_s, iso_s, float(np.clip(conf, 0, 1))
+    # Final fallback to static weights
+    if conf is None:
+        conf = tcn_s * w["tcn"] + ae_s * w["ae"] + gan_attack * w.get("if", 0.0)
+
+    return tcn_s, ae_s, gan_attack, float(np.clip(conf, 0, 1)), iso_s, gan_real, hierarchical_outputs
 
 
 def _ip_to_str(ip_raw):
@@ -383,7 +465,7 @@ def _stream_from_pcaps(m, device, delay: float, max_flows: int):
             if max_flows and sent >= max_flows:
                 break
 
-            tcn_s, ae_s, iso_s, conf = score_row(row, m, device)
+            tcn_s, ae_s, gan_attack, conf, iso_s, gan_real, hierarchical_outputs = score_row(row, m, device)
 
             is_mal = conf >= float(m.get("threshold", 0.45))
             sev = "critical" if conf >= 0.85 else ("high" if conf >= 0.60 else ("medium" if conf >= 0.45 else "low"))
@@ -408,10 +490,14 @@ def _stream_from_pcaps(m, device, delay: float, max_flows: int):
                     "tcn": float(tcn_s),
                     "ae": float(ae_s),
                     "iso": float(iso_s),
+                    "gan_real": float(gan_real),
+                    "gan_attack": float(gan_attack),
                     "ens": float(conf),
                     "weights": dict(m.get("weights", {})),
                     "meta_fuser": bool(m.get("meta_fuser") is not None),
                     "meta_fuser_threshold": float(m.get("meta_fuser_threshold", 0.5)),
+                    "hierarchical_meta_fuser": bool(m.get("hierarchical_meta_fuser") is not None),
+                    "hierarchical_meta_fuser_outputs": hierarchical_outputs,
                     "pcap": pcap_path.name,
                 },
             }
@@ -430,7 +516,7 @@ def _stream_from_pcaps(m, device, delay: float, max_flows: int):
 
             icon = "🚨" if is_mal else "🌐"
             status = "✅" if ok else "❌"
-            print(f"{icon} {sent:>5} {status} {payload['label']:<9} {tcn_s:6.3f} {ae_s:6.3f} {iso_s:6.3f} {conf:6.3f}  {sev.upper():<8} {payload['flow_id'][:48]}")
+            print(f"{icon} {sent:>5} {status} {payload['label']:<9} {tcn_s:6.3f} {ae_s:6.3f} {gan_attack:6.3f} {conf:6.3f}  {sev.upper():<8} {payload['flow_id'][:48]}")
 
             time.sleep(delay)
 
@@ -486,7 +572,7 @@ def get_attack_type(row):
     return "benign"
 
 
-def build_event(row, at, tcn_s, ae_s, iso_s, conf):
+def build_event(row, at, tcn_s, ae_s, gan_attack, conf, iso_s=None, gan_real=None, hierarchical_outputs=None):
     # Use actual CSV label for ground truth, not derived attack type
     csv_label = str(row.get("label", "0")).strip()
     if csv_label in ["1", "malicious", "attack"]:
@@ -505,7 +591,7 @@ def build_event(row, at, tcn_s, ae_s, iso_s, conf):
         model_agreement = 0
         if tcn_s > 0.7: model_agreement += 1
         if ae_s > 0.7: model_agreement += 1  
-        if iso_s > 0.7: model_agreement += 1
+        if gan_attack > 0.7: model_agreement += 1
         
         # Boost confidence based on model agreement
         if model_agreement >= 2:
@@ -514,7 +600,8 @@ def build_event(row, at, tcn_s, ae_s, iso_s, conf):
             conf = max(0.6, conf)  # Minimum threshold for malicious
     else:
         # For benign samples, reduce confidence if models are uncertain
-        model_variance = np.var([tcn_s, ae_s, iso_s])
+        model_variance = np.var([tcn_s, ae_s, gan_attack])
+        
         if model_variance > 0.1:  # High variance = uncertainty
             conf = max(0.1, conf - 0.3)  # Reduce for uncertainty
         else:
@@ -554,13 +641,18 @@ def build_event(row, at, tcn_s, ae_s, iso_s, conf):
         "confidence":round(conf,4),"risk_score":round(conf,4),"severity":sev,
         "attack_type":true_attack,"source_ip":src,"destination_ip":dst,
         "mitre_tactic":tactic,"mitre_technique":tech,"reason":reasons,
-        "blocked":should_block,"anomaly_score":round(iso_s,4),
+        "blocked":should_block,"anomaly_score":round(float(gan_attack),4),
         "timestamp":datetime.now(timezone.utc).isoformat(),
         "total_packets":int(row.get("total_packets",100) or 100),
         "total_bytes":int(row.get("total_bytes",50000) or 50000),
         "duration":float(row.get("duration",1.0) or 1.0),"pps":pps,
         "metadata":{"tcn_score":round(tcn_s,4),"ae_score":round(ae_s,4),
-                    "iso_score":round(iso_s,4),"ensemble":round(conf,4)}
+                    "gan_attack":round(float(gan_attack),4),
+                    "gan_real": None if gan_real is None else round(float(gan_real),4),
+                    "iso_score": None if iso_s is None else round(float(iso_s),4),
+                    "ensemble":round(conf,4),
+                    "hierarchical_meta_fuser_outputs": hierarchical_outputs,
+        }
     }
 
 
@@ -608,7 +700,7 @@ def main():
     for at,cnt in att["_at"].value_counts().items(): print(f"   {at}:{cnt:,}")
 
     print(f"\n🚀 Streaming — Ctrl+C to stop")
-    print(f"   {'#':>4}  {'Type':<15} {'TCN':>6} {'AE':>6} {'ISO':>6} {'ENS':>6}  {'SEV':<8}")
+    print(f"   {'#':>4}  {'Type':<15} {'TCN':>6} {'AE':>6} {'GAN':>6} {'ENS':>6}  {'SEV':<8}")
     print("   "+"─"*65)
 
     ap = att.sample(frac=1).reset_index(drop=True)
@@ -624,8 +716,8 @@ def main():
                 if len(bp)==0: continue
                 row=bp.iloc[bi%len(bp)]; bi+=1; at="benign"
 
-            tcn_s,ae_s,iso_s,conf = score_row(row, m, device)
-            ev = build_event(row, at, tcn_s, ae_s, iso_s, conf)
+            tcn_s, ae_s, gan_attack, conf, iso_s, gan_real, hierarchical_outputs = score_row(row, m, device)
+            ev = build_event(row, at, tcn_s, ae_s, gan_attack, conf, iso_s=iso_s, gan_real=gan_real, hierarchical_outputs=hierarchical_outputs)
 
             try:
                 r=requests.post(f"{WS_SERVER}/detect",json=ev,timeout=5)
@@ -639,11 +731,11 @@ def main():
 
             st="✅" if ok else "❌"
             sev=ev["severity"].upper()
-            print(f"{icon} {sent:>4} {st} {at:<15} {tcn_s:>6.3f} {ae_s:>6.3f} {iso_s:>6.3f} {conf:>6.3f}  {sev:<8}  {ev['flow_id'][:38]}")
+            print(f"{icon} {sent:>4} {st} {at:<15} {tcn_s:>6.3f} {ae_s:>6.3f} {gan_attack:>6.3f} {conf:>6.3f}  {sev:<8}  {ev['flow_id'][:38]}")
 
             if sent%20==0:
                 print(f"\n   📊 {sent} sent | {thr} threats | {ben_c} benign\n")
-                print(f"   {'#':>4}  {'Type':<15} {'TCN':>6} {'AE':>6} {'ISO':>6} {'ENS':>6}  {'SEV':<8}")
+                print(f"   {'#':>4}  {'Type':<15} {'TCN':>6} {'AE':>6} {'GAN':>6} {'ENS':>6}  {'SEV':<8}")
                 print("   "+"─"*65)
 
             time.sleep(DELAY)
