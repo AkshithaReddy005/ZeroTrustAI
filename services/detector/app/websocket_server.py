@@ -578,10 +578,30 @@ async def get_web_interface():
     """Serve main web interface"""
     try:
         repo_root = Path(__file__).resolve().parents[3]
-        html_path = repo_root / "apps" / "web" / "index.html"
+        html_path = repo_root / "apps" / "web" / "login.html"
         return html_path.read_text(encoding="utf-8")
     except FileNotFoundError:
         return "<h1>Web interface not found. Missing apps/web/index.html</h1>"
+
+@app.get("/index.html", response_class=HTMLResponse)
+async def get_index_dashboard():
+    """Serve main dashboard interface"""
+    try:
+        repo_root = Path(__file__).resolve().parents[3]
+        html_path = repo_root / "apps" / "web" / "index.html"
+        return html_path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return "<h1>Main dashboard not found. Missing apps/web/index.html</h1>"
+
+@app.get("/network-analyst-dashboard.html", response_class=HTMLResponse)
+async def get_network_analyst_dashboard():
+    """Serve Network Analyst dashboard interface"""
+    try:
+        repo_root = Path(__file__).resolve().parents[3]
+        html_path = repo_root / "apps" / "web" / "network-analyst-dashboard.html"
+        return html_path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return "<h1>Network Analyst dashboard not found. Missing apps/web/network-analyst-dashboard.html</h1>"
 
 @app.get("/soar-dashboard.html", response_class=HTMLResponse)
 async def get_soar_dashboard():

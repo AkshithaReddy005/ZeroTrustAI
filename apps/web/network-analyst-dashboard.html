@@ -1,0 +1,1051 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>ZeroTrust-AI Network Analyst Dashboard</title>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" />
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    (function () {
+      function loadScript(src) {
+        return new Promise(function (resolve, reject) {
+          var s = document.createElement('script');
+          s.src = src;
+          s.async = true;
+          s.onload = resolve;
+          s.onerror = reject;
+          document.head.appendChild(s);
+        });
+      }
+
+      // Chart.js can fail to load on network hiccups. Try multiple CDNs.
+      window.__chartReady = loadScript('https://cdn.jsdelivr.net/npm/chart.js')
+        .catch(function () {
+          return loadScript('https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js');
+        })
+        .catch(function () {
+          return loadScript('https://unpkg.com/chart.js@4.4.1/dist/chart.umd.js');
+        });
+    })();
+  </script>
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <style>
+    @keyframes pulse-red {
+
+      0%,
+      100% {
+        background-color: rgba(239, 68, 68, .08);
+      }
+
+      50% {
+        background-color: rgba(239, 68, 68, .18);
+      }
+    }
+
+    .threat-high {
+      animation: pulse-red 2s infinite;
+    }
+
+    .cyber-grid {
+      background-image: linear-gradient(rgba(59, 130, 246, .08) 1px, transparent 1px), linear-gradient(90deg, rgba(59, 130, 246, .08) 1px, transparent 1px);
+      background-size: 50px 50px;
+    }
+
+    .rule-card {
+      transition: all 0.3s ease;
+      border-left: 4px solid transparent;
+    }
+
+    .rule-card:hover {
+      transform: translateX(5px);
+      border-left-color: #3b82f6;
+    }
+
+    .rule-pending {
+      border-left-color: #f59e0b;
+    }
+
+    .rule-approved {
+      border-left-color: #10b981;
+    }
+
+    .rule-rejected {
+      border-left-color: #ef4444;
+    }
+
+    .ai-suggestion {
+      background: #1e3a8a;
+      border: 1px solid #3b82f6;
+    }
+  </style>
+</head>
+
+<body class="bg-gray-900 text-white cyber-grid">
+  <div id="root"></div>
+  <script type="text/babel">
+    const { useEffect, useRef, useState, useMemo } = React;
+    const API_BASE = 'http://localhost:9000';
+    const WS_URL = 'ws://localhost:9000/ws';
+
+    // --- Risk-based normalization and aggregation helpers ---
+    const ROLLING_WINDOW_MINUTES = 60;
+
+    const deriveDetectionEngine = (reasons) => {
+      const text = (reasons || []).join(' ').toLowerCase();
+      if (!text) return null;
+      if (text.includes('cnn') || text.includes('pattern')) return 'CNN Classifier';
+      if (text.includes('anomaly') || text.includes('anomal') || text.includes('entropy')) return 'Anomaly Detection';
+      if (text.includes('behavior') || text.includes('behaviour') || text.includes('frequency')) return 'Behavioural Model';
+      return null;
+    };
+
+    const mapToMitre = (event) => {
+      const sev = (event.display_severity || '').toLowerCase();
+      if (sev !== 'high' || !event.is_threat) return null;
+      const attack = (event.attack_type || '').toLowerCase();
+      const reasonsText = (event.reason || []).join(' ').toLowerCase();
+
+      if (attack.includes('ddos') || reasonsText.includes('ddos') || reasonsText.includes('flood')) {
+        return { tactic: 'Impact', technique: 'T1499' };
+      }
+      if (attack.includes('c2') || reasonsText.includes('c2') || reasonsText.includes('command') || reasonsText.includes('beacon')) {
+        return { tactic: 'Command & Control', technique: 'T1071' };
+      }
+      if (attack.includes('scan') || reasonsText.includes('scan') || reasonsText.includes('recon')) {
+        return { tactic: 'Reconnaissance', technique: 'T1046' };
+      }
+      return null;
+    };
+
+    const normalizeEvent = (raw) => {
+      const isThreat = raw.label === 'malicious';
+      const displaySeverity = (() => {
+        const sev = (raw.severity || '').toLowerCase();
+        if (sev === 'critical') return 'critical';
+        if (sev === 'high') return 'high';
+        if (sev === 'medium') return 'medium';
+        if (sev === 'low') return 'low';
+        return isThreat ? 'high' : 'low';
+      })();
+
+      return {
+        ...raw,
+        is_threat: isThreat,
+        display_severity: displaySeverity,
+        detection_engine: deriveDetectionEngine(raw.reason),
+        mitre: mapToMitre(raw),
+        timestamp: raw.timestamp || new Date().toISOString(),
+        flow_id: raw.flow_id || `flow-${Math.random().toString(36).substr(2, 9)}`,
+      };
+    };
+
+    // --- Network Analyst Dashboard Component ---
+    const NetworkAnalystDashboard = () => {
+      const [events, setEvents] = useState([]);
+      const [threats, setThreats] = useState([]);
+      const [decisions, setDecisions] = useState([]);
+      const [metrics, setMetrics] = useState({});
+      const [ws, setWs] = useState(null);
+      const [activeTab, setActiveTab] = useState('overview');
+      const [rules, setRules] = useState([]);
+      const [showAddRuleModal, setShowAddRuleModal] = useState(false);
+      const [aiSuggestions, setAiSuggestions] = useState([]);
+      const [selectedRule, setSelectedRule] = useState(null);
+
+      // Fetch initial data
+      useEffect(() => {
+        const fetchInitialData = async () => {
+          try {
+            const [eventsRes, threatsRes, decisionsRes, metricsRes] = await Promise.all([
+              fetch(`${API_BASE}/events?limit=1000`),
+              fetch(`${API_BASE}/threats?limit=100`),
+              fetch(`${API_BASE}/decisions?limit=100`),
+              fetch(`${API_BASE}/metrics`)
+            ]);
+
+            const [eventsData, threatsData, decisionsData, metricsData] = await Promise.all([
+              eventsRes.json(),
+              threatsRes.json(),
+              decisionsRes.json(),
+              metricsRes.json()
+            ]);
+
+            setEvents(eventsData.map(normalizeEvent));
+            setThreats(threatsData.map(normalizeEvent));
+            setDecisions(decisionsData);
+            setMetrics(metricsData);
+
+            // Load existing rules
+            loadRules();
+            // Load AI suggestions
+            loadAiSuggestions();
+
+          } catch (error) {
+            console.error('Failed to fetch initial data:', error);
+          }
+        };
+
+        fetchInitialData();
+      }, []);
+
+      // WebSocket connection
+      useEffect(() => {
+        const websocket = new WebSocket(WS_URL);
+
+        websocket.onopen = () => {
+          console.log('WebSocket connected');
+          setWs(websocket);
+        };
+
+        websocket.onmessage = (event) => {
+          try {
+            const data = JSON.parse(event.data);
+            if (data.type === 'new_threat') {
+              const normalizedThreat = normalizeEvent(data.data);
+              setThreats(prev => [normalizedThreat, ...prev.slice(0, 99)]);
+              setEvents(prev => [normalizedThreat, ...prev.slice(0, 999)]);
+            }
+          } catch (error) {
+            console.error('WebSocket message error:', error);
+          }
+        };
+
+        websocket.onclose = () => {
+          console.log('WebSocket disconnected');
+          setTimeout(() => {
+            const ws = new WebSocket(WS_URL);
+            setWs(ws);
+          }, 3000);
+        };
+
+        return () => {
+          websocket.close();
+        };
+      }, []);
+
+      const loadRules = async () => {
+        // Mock rules data - in production, this would come from API
+        const mockRules = [
+          {
+            id: 1,
+            name: 'Block Suspicious IP Ranges',
+            description: 'Automatically block traffic from known malicious IP ranges',
+            condition: 'source_ip in malicious_ranges',
+            action: 'block',
+            status: 'approved',
+            createdBy: 'admin',
+            createdAt: '2024-01-15T10:30:00Z',
+            aiSuggested: false
+          },
+          {
+            id: 2,
+            name: 'Rate Limit DDoS Patterns',
+            description: 'Limit connection rate for potential DDoS attack patterns',
+            condition: 'connection_rate > threshold',
+            action: 'rate_limit',
+            status: 'pending',
+            createdBy: 'ai_assistant',
+            createdAt: '2024-01-16T14:20:00Z',
+            aiSuggested: true
+          }
+        ];
+        setRules(mockRules);
+      };
+
+      const loadAiSuggestions = async () => {
+        // Mock AI suggestions
+        const mockSuggestions = [
+          {
+            id: 'ai_1',
+            title: 'Anomalous Traffic Pattern Detected',
+            description: 'AI has identified unusual traffic patterns from 192.168.1.0/24 suggesting potential lateral movement',
+            suggestedRule: {
+              name: 'Monitor Lateral Movement',
+              condition: 'source_ip in 192.168.1.0/24 AND destination_port = 445',
+              action: 'monitor_and_alert',
+              confidence: 0.87
+            },
+            priority: 'high',
+            timestamp: new Date().toISOString()
+          }
+        ];
+        setAiSuggestions(mockSuggestions);
+      };
+
+      const handleAddRule = (newRule) => {
+        const rule = {
+          id: Date.now(),
+          ...newRule,
+          status: 'pending',
+          createdBy: 'network_analyst',
+          createdAt: new Date().toISOString(),
+          aiSuggested: false
+        };
+        setRules(prev => [rule, ...prev]);
+        setShowAddRuleModal(false);
+      };
+
+      const handleApproveRule = (ruleId) => {
+        setRules(prev => prev.map(rule => 
+          rule.id === ruleId ? { ...rule, status: 'approved', approvedBy: 'network_analyst', approvedAt: new Date().toISOString() } : rule
+        ));
+      };
+
+      const handleRejectRule = (ruleId) => {
+        setRules(prev => prev.map(rule => 
+          rule.id === ruleId ? { ...rule, status: 'rejected', rejectedBy: 'network_analyst', rejectedAt: new Date().toISOString() } : rule
+        ));
+      };
+
+      const handleAdoptAiSuggestion = (suggestion) => {
+        const newRule = {
+          name: suggestion.suggestedRule.name,
+          description: suggestion.title,
+          condition: suggestion.suggestedRule.condition,
+          action: suggestion.suggestedRule.action,
+          aiSuggested: true,
+          aiConfidence: suggestion.suggestedRule.confidence
+        };
+        handleAddRule(newRule);
+      };
+
+      // Stats calculations
+      const stats = useMemo(() => ({
+        totalRules: rules.length,
+        pendingRules: rules.filter(r => r.status === 'pending').length,
+        approvedRules: rules.filter(r => r.status === 'approved').length,
+        aiSuggestions: aiSuggestions.length,
+        totalThreats: threats.length,
+        highSeverityThreats: threats.filter(t => t.display_severity === 'high' || t.display_severity === 'critical').length
+      }), [rules, aiSuggestions, threats]);
+
+      return (
+        <div className="min-h-screen bg-gray-900">
+          {/* Header */}
+          <header className="bg-gray-800 border-b border-gray-700">
+            <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+              <div className="flex justify-between items-center py-4">
+                <div className="flex items-center space-x-4">
+                  <h1 className="text-2xl font-bold text-blue-400">
+                    <i className="fas fa-network-wired mr-2"></i>
+                    Network Analyst Dashboard
+                  </h1>
+                  <span className="bg-yellow-500 text-white px-3 py-1 rounded-full text-sm">
+                    Admin Access
+                  </span>
+                </div>
+                <div className="flex items-center space-x-4">
+                  <a href="/index.html" className="text-gray-400 hover:text-white px-3 py-2 rounded-lg flex items-center space-x-2">
+                    <i className="fas fa-arrow-left"></i>
+                    <span>Back to SOC</span>
+                  </a>
+                  <button
+                    onClick={() => setShowAddRuleModal(true)}
+                    className="bg-blue-600 hover:bg-blue-700 px-4 py-2 rounded-lg flex items-center space-x-2"
+                  >
+                    <i className="fas fa-plus"></i>
+                    <span>Add Rule</span>
+                  </button>
+                  <a href="/soar-command-center.html" className="bg-purple-600 hover:bg-purple-700 px-4 py-2 rounded-lg flex items-center space-x-2">
+                    <i className="fas fa-robot"></i>
+                    <span>SOAR Center</span>
+                  </a>
+                  <a href="/" className="bg-gray-700 hover:bg-gray-600 px-4 py-2 rounded-lg flex items-center space-x-2">
+                    <i className="fas fa-sign-out-alt"></i>
+                    <span>Logout</span>
+                  </a>
+                </div>
+              </div>
+            </div>
+          </header>
+
+          {/* Navigation Tabs */}
+          <div className="bg-gray-800 border-b border-gray-700">
+            <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+              <nav className="flex space-x-8">
+                {['overview', 'rules', 'ai-integration', 'threat-intelligence', 'threat-monitoring'].map(tab => (
+                  <button
+                    key={tab}
+                    onClick={() => setActiveTab(tab)}
+                    className={`py-4 px-1 border-b-2 font-medium text-sm ${
+                      activeTab === tab
+                        ? 'border-blue-500 text-blue-400'
+                        : 'border-transparent text-gray-400 hover:text-gray-300'
+                    }`}
+                  >
+                    {tab.charAt(0).toUpperCase() + tab.slice(1).replace('-', ' ')}
+                  </button>
+                ))}
+              </nav>
+            </div>
+          </div>
+
+          {/* Main Content */}
+          <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+            {/* Overview Tab */}
+            {activeTab === 'overview' && (
+              <div className="space-y-6">
+                {/* Stats Cards */}
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
+                  <div className="bg-gray-800 rounded-lg p-6">
+                    <div className="flex items-center">
+                      <div className="flex-shrink-0 bg-blue-500 rounded-md p-3">
+                        <i className="fas fa-shield-alt text-white text-xl"></i>
+                      </div>
+                      <div className="ml-5 w-0 flex-1">
+                        <dl>
+                          <dt className="text-2xl font-semibold text-white">{stats.totalRules}</dt>
+                          <dd className="text-gray-400">Total Rules</dd>
+                        </dl>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="bg-gray-800 rounded-lg p-6">
+                    <div className="flex items-center">
+                      <div className="flex-shrink-0 bg-yellow-500 rounded-md p-3">
+                        <i className="fas fa-clock text-white text-xl"></i>
+                      </div>
+                      <div className="ml-5 w-0 flex-1">
+                        <dl>
+                          <dt className="text-2xl font-semibold text-white">{stats.pendingRules}</dt>
+                          <dd className="text-gray-400">Pending Approval</dd>
+                        </dl>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="bg-gray-800 rounded-lg p-6">
+                    <div className="flex items-center">
+                      <div className="flex-shrink-0 bg-green-500 rounded-md p-3">
+                        <i className="fas fa-check text-white text-xl"></i>
+                      </div>
+                      <div className="ml-5 w-0 flex-1">
+                        <dl>
+                          <dt className="text-2xl font-semibold text-white">{stats.approvedRules}</dt>
+                          <dd className="text-gray-400">Approved Rules</dd>
+                        </dl>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="bg-gray-800 rounded-lg p-6">
+                    <div className="flex items-center">
+                      <div className="flex-shrink-0 bg-purple-500 rounded-md p-3">
+                        <i className="fas fa-robot text-white text-xl"></i>
+                      </div>
+                      <div className="ml-5 w-0 flex-1">
+                        <dl>
+                          <dt className="text-2xl font-semibold text-white">{stats.aiSuggestions}</dt>
+                          <dd className="text-gray-400">AI Suggestions</dd>
+                        </dl>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Recent Rules */}
+                <div className="bg-gray-800 rounded-lg p-6">
+                  <h2 className="text-lg font-semibold mb-4">Recent Rules</h2>
+                  <div className="space-y-3">
+                    {rules.slice(0, 5).map(rule => (
+                      <div key={rule.id} className={`rule-card bg-gray-700 rounded-lg p-4 ${rule.status === 'pending' ? 'rule-pending' : rule.status === 'approved' ? 'rule-approved' : 'rule-rejected'}`}>
+                        <div className="flex justify-between items-start">
+                          <div>
+                            <h3 className="font-medium text-white">{rule.name}</h3>
+                            <p className="text-gray-400 text-sm mt-1">{rule.description}</p>
+                            <div className="flex items-center space-x-4 mt-2 text-xs text-gray-500">
+                              <span>Created: {new Date(rule.createdAt).toLocaleDateString()}</span>
+                              <span>By: {rule.createdBy}</span>
+                              {rule.aiSuggested && <span className="text-purple-400"><i className="fas fa-robot mr-1"></i>AI Suggested</span>}
+                            </div>
+                          </div>
+                          <div className="flex items-center space-x-2">
+                            <span className={`px-2 py-1 rounded text-xs font-medium ${
+                              rule.status === 'approved' ? 'bg-green-900 text-green-200' :
+                              rule.status === 'rejected' ? 'bg-red-900 text-red-200' :
+                              'bg-yellow-900 text-yellow-200'
+                            }`}>
+                              {rule.status}
+                            </span>
+                            {rule.status === 'pending' && (
+                              <div className="flex space-x-1">
+                                <button
+                                  onClick={() => handleApproveRule(rule.id)}
+                                  className="text-green-400 hover:text-green-300"
+                                  title="Approve"
+                                >
+                                  <i className="fas fa-check"></i>
+                                </button>
+                                <button
+                                  onClick={() => handleRejectRule(rule.id)}
+                                  className="text-red-400 hover:text-red-300"
+                                  title="Reject"
+                                >
+                                  <i className="fas fa-times"></i>
+                                </button>
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* Rules Tab */}
+            {activeTab === 'rules' && (
+              <div className="space-y-6">
+                <div className="flex justify-between items-center">
+                  <h2 className="text-xl font-semibold">Security Rules Management</h2>
+                  <button
+                    onClick={() => setShowAddRuleModal(true)}
+                    className="bg-blue-600 hover:bg-blue-700 px-4 py-2 rounded-lg flex items-center space-x-2"
+                  >
+                    <i className="fas fa-plus"></i>
+                    <span>Add New Rule</span>
+                  </button>
+                </div>
+
+                <div className="bg-gray-800 rounded-lg">
+                  <div className="p-6">
+                    <div className="space-y-3">
+                      {rules.map(rule => (
+                        <div key={rule.id} className={`rule-card bg-gray-700 rounded-lg p-4 ${rule.status === 'pending' ? 'rule-pending' : rule.status === 'approved' ? 'rule-approved' : 'rule-rejected'}`}>
+                          <div className="flex justify-between items-start">
+                            <div className="flex-1">
+                              <div className="flex items-center space-x-3">
+                                <h3 className="font-medium text-white">{rule.name}</h3>
+                                {rule.aiSuggested && <span className="text-purple-400 text-sm"><i className="fas fa-robot mr-1"></i>AI Suggested</span>}
+                              </div>
+                              <p className="text-gray-400 text-sm mt-1">{rule.description}</p>
+                              <div className="mt-3 space-y-1">
+                                <div className="text-sm">
+                                  <span className="text-gray-500">Condition:</span>
+                                  <code className="ml-2 text-blue-400">{rule.condition}</code>
+                                </div>
+                                <div className="text-sm">
+                                  <span className="text-gray-500">Action:</span>
+                                  <span className="ml-2 text-green-400">{rule.action}</span>
+                                </div>
+                              </div>
+                              <div className="flex items-center space-x-4 mt-3 text-xs text-gray-500">
+                                <span>Created: {new Date(rule.createdAt).toLocaleDateString()}</span>
+                                <span>By: {rule.createdBy}</span>
+                                {rule.aiConfidence && <span>AI Confidence: {(rule.aiConfidence * 100).toFixed(1)}%</span>}
+                              </div>
+                            </div>
+                            <div className="flex items-center space-x-2 ml-4">
+                              <span className={`px-3 py-1 rounded-full text-xs font-medium ${
+                                rule.status === 'approved' ? 'bg-green-900 text-green-200' :
+                                rule.status === 'rejected' ? 'bg-red-900 text-red-200' :
+                                'bg-yellow-900 text-yellow-200'
+                              }`}>
+                                {rule.status}
+                              </span>
+                              {rule.status === 'pending' && (
+                                <div className="flex space-x-2">
+                                  <button
+                                    onClick={() => handleApproveRule(rule.id)}
+                                    className="bg-green-600 hover:bg-green-700 px-3 py-1 rounded text-sm"
+                                  >
+                                    Approve
+                                  </button>
+                                  <button
+                                    onClick={() => handleRejectRule(rule.id)}
+                                    className="bg-red-600 hover:bg-red-700 px-3 py-1 rounded text-sm"
+                                  >
+                                    Reject
+                                  </button>
+                                </div>
+                              )}
+                            </div>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* AI Integration Tab */}
+            {activeTab === 'ai-integration' && (
+              <div className="space-y-6">
+                <h2 className="text-xl font-semibold">AI Integration & Suggestions</h2>
+
+                {/* AI Suggestions */}
+                <div className="space-y-4">
+                  {aiSuggestions.map(suggestion => (
+                    <div key={suggestion.id} className="ai-suggestion bg-gray-800 rounded-lg p-6">
+                      <div className="flex justify-between items-start">
+                        <div className="flex-1">
+                          <div className="flex items-center space-x-3 mb-3">
+                            <i className="fas fa-robot text-purple-500 text-xl"></i>
+                            <h3 className="font-medium text-white">{suggestion.title}</h3>
+                            <span className={`px-2 py-1 rounded text-xs ${
+                              suggestion.priority === 'high' ? 'bg-red-900 text-red-200' : 'bg-yellow-900 text-yellow-200'
+                            }`}>
+                              {suggestion.priority} priority
+                            </span>
+                          </div>
+                          <p className="text-gray-300 mb-4">{suggestion.description}</p>
+                          
+                          <div className="bg-gray-700 rounded-lg p-4 mb-4">
+                            <h4 className="font-medium text-white mb-2">Suggested Rule:</h4>
+                            <div className="space-y-2">
+                              <div>
+                                <span className="text-gray-400 text-sm">Name:</span>
+                                <span className="ml-2 text-white">{suggestion.suggestedRule.name}</span>
+                              </div>
+                              <div>
+                                <span className="text-gray-400 text-sm">Condition:</span>
+                                <code className="ml-2 text-blue-400">{suggestion.suggestedRule.condition}</code>
+                              </div>
+                              <div>
+                                <span className="text-gray-400 text-sm">Action:</span>
+                                <span className="ml-2 text-green-400">{suggestion.suggestedRule.action}</span>
+                              </div>
+                              <div>
+                                <span className="text-gray-400 text-sm">Confidence:</span>
+                                <span className="ml-2 text-purple-400">{(suggestion.suggestedRule.confidence * 100).toFixed(1)}%</span>
+                              </div>
+                            </div>
+                          </div>
+
+                          <div className="text-xs text-gray-500">
+                            Suggested: {new Date(suggestion.timestamp).toLocaleString()}
+                          </div>
+                        </div>
+                        
+                        <div className="flex space-x-2 ml-4">
+                          <button
+                            onClick={() => handleAdoptAiSuggestion(suggestion)}
+                            className="bg-purple-600 hover:bg-purple-700 px-4 py-2 rounded-lg text-sm flex items-center space-x-2"
+                          >
+                            <i className="fas fa-check"></i>
+                            <span>Adopt</span>
+                          </button>
+                          <button className="bg-gray-700 hover:bg-gray-600 px-4 py-2 rounded-lg text-sm">
+                            <i className="fas fa-times"></i>
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Threat Intelligence Tab */}
+            {activeTab === 'threat-intelligence' && (
+              <div className="space-y-6">
+                <div className="flex justify-between items-center">
+                  <h2 className="text-xl font-semibold">Threat Intelligence Integration</h2>
+                  <div className="flex space-x-2">
+                    <button className="bg-blue-600 hover:bg-blue-700 px-4 py-2 rounded-lg text-sm flex items-center space-x-2">
+                      <i className="fas fa-sync"></i>
+                      <span>Refresh Feeds</span>
+                    </button>
+                    <button className="bg-purple-600 hover:bg-purple-700 px-4 py-2 rounded-lg text-sm flex items-center space-x-2">
+                      <i className="fas fa-download"></i>
+                      <span>Import IoCs</span>
+                    </button>
+                  </div>
+                </div>
+
+                {/* Threat Intelligence Overview */}
+                <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
+                  <div className="bg-gray-800 rounded-lg p-6">
+                    <div className="flex items-center">
+                      <div className="flex-shrink-0 bg-red-500 rounded-md p-3">
+                        <i className="fas fa-exclamation-triangle text-white text-xl"></i>
+                      </div>
+                      <div className="ml-5 w-0 flex-1">
+                        <dl>
+                          <dt className="text-2xl font-semibold text-white">247</dt>
+                          <dd className="text-gray-400">Active Threats</dd>
+                        </dl>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="bg-gray-800 rounded-lg p-6">
+                    <div className="flex items-center">
+                      <div className="flex-shrink-0 bg-orange-500 rounded-md p-3">
+                        <i className="fas fa-shield-virus text-white text-xl"></i>
+                      </div>
+                      <div className="ml-5 w-0 flex-1">
+                        <dl>
+                          <dt className="text-2xl font-semibold text-white">1,842</dt>
+                          <dd className="text-gray-400">IoCs Tracked</dd>
+                        </dl>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="bg-gray-800 rounded-lg p-6">
+                    <div className="flex items-center">
+                      <div className="flex-shrink-0 bg-yellow-500 rounded-md p-3">
+                        <i className="fas fa-globe text-white text-xl"></i>
+                      </div>
+                      <div className="ml-5 w-0 flex-1">
+                        <dl>
+                          <dt className="text-2xl font-semibold text-white">12</dt>
+                          <dd className="text-gray-400">Active Feeds</dd>
+                        </dl>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="bg-gray-800 rounded-lg p-6">
+                    <div className="flex items-center">
+                      <div className="flex-shrink-0 bg-green-500 rounded-md p-3">
+                        <i className="fas fa-check-circle text-white text-xl"></i>
+                      </div>
+                      <div className="ml-5 w-0 flex-1">
+                        <dl>
+                          <dt className="text-2xl font-semibold text-white">98.2%</dt>
+                          <dd className="text-gray-400">Accuracy</dd>
+                        </dl>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                {/* External Threat Feeds */}
+                <div className="bg-gray-800 rounded-lg p-6">
+                  <h3 className="text-lg font-medium text-white mb-4">External Threat Feeds</h3>
+                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                    {[
+                      { name: 'VirusTotal', status: 'active', lastUpdate: '2 mins ago', threats: 89 },
+                      { name: 'AlienVault OTX', status: 'active', lastUpdate: '5 mins ago', threats: 156 },
+                      { name: 'MISP', status: 'active', lastUpdate: '1 min ago', threats: 234 },
+                      { name: 'ThreatConnect', status: 'active', lastUpdate: '3 mins ago', threats: 67 },
+                      { name: 'Recorded Future', status: 'active', lastUpdate: '10 mins ago', threats: 45 },
+                      { name: 'IBM X-Force', status: 'inactive', lastUpdate: '2 hours ago', threats: 0 }
+                    ].map((feed, index) => (
+                      <div key={index} className="bg-gray-700 rounded-lg p-4">
+                        <div className="flex justify-between items-start mb-3">
+                          <div>
+                            <h4 className="font-medium text-white">{feed.name}</h4>
+                            <p className="text-gray-400 text-sm">Last update: {feed.lastUpdate}</p>
+                          </div>
+                          <span className={`px-2 py-1 rounded text-xs ${
+                            feed.status === 'active' ? 'bg-green-900 text-green-200' : 'bg-gray-600 text-gray-300'
+                          }`}>
+                            {feed.status}
+                          </span>
+                        </div>
+                        <div className="flex justify-between items-center">
+                          <span className="text-sm text-gray-400">{feed.threats} threats</span>
+                          <button className="text-blue-400 hover:text-blue-300 text-sm">
+                            <i className="fas fa-cog"></i>
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                {/* IoC Enrichment */}
+                <div className="bg-gray-800 rounded-lg p-6">
+                  <h3 className="text-lg font-medium text-white mb-4">Recent IoC Enrichment</h3>
+                  <div className="space-y-3">
+                    {[
+                      {
+                        ioc: '192.168.1.105',
+                        type: 'IP Address',
+                        threatScore: 85,
+                        sources: ['VirusTotal', 'OTX'],
+                        threats: ['Malware C2', 'Botnet'],
+                        firstSeen: '2024-01-15T10:30:00Z',
+                        lastSeen: '2024-01-16T14:20:00Z'
+                      },
+                      {
+                        ioc: 'malicious-example.com',
+                        type: 'Domain',
+                        threatScore: 92,
+                        sources: ['VirusTotal', 'MISP', 'ThreatConnect'],
+                        threats: ['Phishing', 'Malware Distribution'],
+                        firstSeen: '2024-01-14T08:15:00Z',
+                        lastSeen: '2024-01-16T16:45:00Z'
+                      },
+                      {
+                        ioc: 'a1b2c3d4e5f6...',
+                        type: 'File Hash',
+                        threatScore: 78,
+                        sources: ['VirusTotal'],
+                        threats: ['Trojan', 'Backdoor'],
+                        firstSeen: '2024-01-13T12:00:00Z',
+                        lastSeen: '2024-01-13T12:00:00Z'
+                      }
+                    ].map((ioc, index) => (
+                      <div key={index} className="bg-gray-700 rounded-lg p-4">
+                        <div className="flex justify-between items-start">
+                          <div className="flex-1">
+                            <div className="flex items-center space-x-3 mb-2">
+                              <h4 className="font-medium text-white">{ioc.ioc}</h4>
+                              <span className="bg-gray-600 text-gray-300 px-2 py-1 rounded text-xs">{ioc.type}</span>
+                              <div className="flex items-center space-x-1">
+                                <div className={`w-2 h-2 rounded-full ${
+                                  ioc.threatScore >= 80 ? 'bg-red-500' : 
+                                  ioc.threatScore >= 60 ? 'bg-yellow-500' : 'bg-green-500'
+                                }`}></div>
+                                <span className="text-sm text-gray-400">Score: {ioc.threatScore}</span>
+                              </div>
+                            </div>
+                            <div className="flex flex-wrap gap-2 mb-2">
+                              {ioc.threats.map((threat, idx) => (
+                                <span key={idx} className="bg-red-900 text-red-200 px-2 py-1 rounded text-xs">
+                                  {threat}
+                                </span>
+                              ))}
+                            </div>
+                            <div className="flex items-center space-x-4 text-xs text-gray-500">
+                              <span>Sources: {ioc.sources.join(', ')}</span>
+                              <span>First: {new Date(ioc.firstSeen).toLocaleDateString()}</span>
+                              <span>Last: {new Date(ioc.lastSeen).toLocaleDateString()}</span>
+                            </div>
+                          </div>
+                          <div className="flex space-x-2 ml-4">
+                            <button className="text-blue-400 hover:text-blue-300" title="Investigate">
+                              <i className="fas fa-search"></i>
+                            </button>
+                            <button className="text-red-400 hover:text-red-300" title="Block">
+                              <i className="fas fa-ban"></i>
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Threat Scoring Analytics */}
+                <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                  <div className="bg-gray-800 rounded-lg p-6">
+                    <h3 className="text-lg font-medium text-white mb-4">Threat Score Distribution</h3>
+                    <div className="space-y-3">
+                      {[
+                        { range: '90-100', count: 45, color: 'bg-red-500' },
+                        { range: '80-89', count: 78, color: 'bg-orange-500' },
+                        { range: '70-79', count: 123, color: 'bg-yellow-500' },
+                        { range: '60-69', count: 234, color: 'bg-blue-500' },
+                        { range: '0-59', count: 567, color: 'bg-green-500' }
+                      ].map((score, index) => (
+                        <div key={index} className="flex items-center space-x-3">
+                          <span className="text-sm text-gray-400 w-16">{score.range}</span>
+                          <div className="flex-1 bg-gray-700 rounded-full h-6 overflow-hidden">
+                            <div 
+                              className={`h-full ${score.color} transition-all duration-500`}
+                              style={{ width: `${(score.count / 567) * 100}%` }}
+                            ></div>
+                          </div>
+                          <span className="text-sm text-gray-400 w-12 text-right">{score.count}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div className="bg-gray-800 rounded-lg p-6">
+                    <h3 className="text-lg font-medium text-white mb-4">Top Threat Categories</h3>
+                    <div className="space-y-3">
+                      {[
+                        { category: 'Malware', count: 234, percentage: 35 },
+                        { category: 'Phishing', count: 189, percentage: 28 },
+                        { category: 'Botnets', count: 123, percentage: 18 },
+                        { category: 'C2 Servers', count: 89, percentage: 13 },
+                        { category: 'Exploits', count: 34, percentage: 6 }
+                      ].map((category, index) => (
+                        <div key={index} className="flex items-center space-x-3">
+                          <span className="text-sm text-gray-400 w-24">{category.category}</span>
+                          <div className="flex-1 bg-gray-700 rounded-full h-6 overflow-hidden">
+                            <div 
+                              className="h-full bg-gradient-to-r from-blue-500 to-purple-500 transition-all duration-500"
+                              style={{ width: `${category.percentage}%` }}
+                            ></div>
+                          </div>
+                          <span className="text-sm text-gray-400 w-12 text-right">{category.count}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* Threat Monitoring Tab */}
+            {activeTab === 'threat-monitoring' && (
+              <div className="space-y-6">
+                <h2 className="text-xl font-semibold">Threat Monitoring</h2>
+                
+                {/* Threat Stats */}
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+                  <div className="bg-gray-800 rounded-lg p-6">
+                    <h3 className="text-lg font-medium text-white mb-2">Total Threats</h3>
+                    <p className="text-3xl font-bold text-blue-400">{stats.totalThreats}</p>
+                  </div>
+                  <div className="bg-gray-800 rounded-lg p-6">
+                    <h3 className="text-lg font-medium text-white mb-2">High Severity</h3>
+                    <p className="text-3xl font-bold text-red-400">{stats.highSeverityThreats}</p>
+                  </div>
+                  <div className="bg-gray-800 rounded-lg p-6">
+                    <h3 className="text-lg font-medium text-white mb-2">Active Rules</h3>
+                    <p className="text-3xl font-bold text-green-400">{stats.approvedRules}</p>
+                  </div>
+                </div>
+
+                {/* Recent Threats */}
+                <div className="bg-gray-800 rounded-lg p-6">
+                  <h3 className="text-lg font-medium text-white mb-4">Recent Threats</h3>
+                  <div className="space-y-3">
+                    {threats.slice(0, 10).map(threat => (
+                      <div key={threat.flow_id} className={`bg-gray-700 rounded-lg p-4 ${threat.display_severity === 'high' || threat.display_severity === 'critical' ? 'threat-high' : ''}`}>
+                        <div className="flex justify-between items-start">
+                          <div>
+                            <div className="flex items-center space-x-3">
+                              <h4 className="font-medium text-white">{threat.attack_type || 'Unknown Attack'}</h4>
+                              <span className={`px-2 py-1 rounded text-xs ${
+                                threat.display_severity === 'critical' ? 'bg-red-900 text-red-200' :
+                                threat.display_severity === 'high' ? 'bg-red-800 text-red-200' :
+                                threat.display_severity === 'medium' ? 'bg-yellow-800 text-yellow-200' :
+                                'bg-gray-600 text-gray-200'
+                              }`}>
+                                {threat.display_severity}
+                              </span>
+                            </div>
+                            <p className="text-gray-400 text-sm mt-1">
+                              {threat.source_ip} -> {threat.destination_ip}
+                            </p>
+                            <div className="flex items-center space-x-4 mt-2 text-xs text-gray-500">
+                              <span>Confidence: {(threat.confidence * 100).toFixed(1)}%</span>
+                              <span>{new Date(threat.timestamp).toLocaleString()}</span>
+                            </div>
+                          </div>
+                          {threat.blocked && (
+                            <span className="bg-red-600 text-white px-2 py-1 rounded text-xs">
+                              Blocked
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            )}
+          </main>
+
+          {/* Add Rule Modal */}
+          {showAddRuleModal && (
+            <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+              <div className="bg-gray-800 rounded-lg p-6 w-full max-w-2xl">
+                <h3 className="text-xl font-semibold text-white mb-4">Add New Security Rule</h3>
+                <AddRuleForm
+                  onSubmit={handleAddRule}
+                  onCancel={() => setShowAddRuleModal(false)}
+                />
+              </div>
+            </div>
+          )}
+        </div>
+      );
+    };
+
+    // Add Rule Form Component
+    const AddRuleForm = ({ onSubmit, onCancel }) => {
+      const [formData, setFormData] = useState({
+        name: '',
+        description: '',
+        condition: '',
+        action: 'block'
+      });
+
+      const handleSubmit = (e) => {
+        e.preventDefault();
+        onSubmit(formData);
+      };
+
+      return (
+        <form onSubmit={handleSubmit} className="space-y-4">
+          <div>
+            <label className="block text-sm font-medium text-gray-300 mb-2">Rule Name</label>
+            <input
+              type="text"
+              required
+              value={formData.name}
+              onChange={(e) => setFormData({...formData, name: e.target.value})}
+              className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-md text-white focus:outline-none focus:ring-2 focus:ring-blue-500"
+              placeholder="Enter rule name"
+            />
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium text-gray-300 mb-2">Description</label>
+            <textarea
+              required
+              value={formData.description}
+              onChange={(e) => setFormData({...formData, description: e.target.value})}
+              className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-md text-white focus:outline-none focus:ring-2 focus:ring-blue-500"
+              rows="3"
+              placeholder="Describe what this rule does"
+            />
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium text-gray-300 mb-2">Condition</label>
+            <input
+              type="text"
+              required
+              value={formData.condition}
+              onChange={(e) => setFormData({...formData, condition: e.target.value})}
+              className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-md text-white focus:outline-none focus:ring-2 focus:ring-blue-500"
+              placeholder="e.g., source_ip in malicious_ranges"
+            />
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium text-gray-300 mb-2">Action</label>
+            <select
+              value={formData.action}
+              onChange={(e) => setFormData({...formData, action: e.target.value})}
+              className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-md text-white focus:outline-none focus:ring-2 focus:ring-blue-500"
+            >
+              <option value="block">Block</option>
+              <option value="monitor">Monitor</option>
+              <option value="rate_limit">Rate Limit</option>
+              <option value="alert">Alert Only</option>
+            </select>
+          </div>
+
+          <div className="flex justify-end space-x-3 pt-4">
+            <button
+              type="button"
+              onClick={onCancel}
+              className="px-4 py-2 bg-gray-600 hover:bg-gray-700 rounded-md text-white"
+            >
+              Cancel
+            </button>
+            <button
+              type="submit"
+              className="px-4 py-2 bg-blue-600 hover:bg-blue-700 rounded-md text-white"
+            >
+              Create Rule
+            </button>
+          </div>
+        </form>
+      );
+    };
+
+    // Render the app
+    ReactDOM.render(<NetworkAnalystDashboard />, document.getElementById('root'));
+  </script>
+</body>
+</html>
