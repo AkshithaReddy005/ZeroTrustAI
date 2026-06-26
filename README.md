@@ -8,100 +8,29 @@ ZeroTrust-AI is a comprehensive, production-ready, enterprise-grade security pla
 
 ZeroTrust-AI implements a two-stage Hierarchical Meta-Fuser consensus design for multi-layered security validation and automated mitigation:
 
-```mermaid
-graph TD
-    %% Nodes
-    PCAP["PCAP Files<br>(Network Traffic Captures)"]
-    SPLT["SPLT Feature Extraction<br>(Sequence of Packet Lengths & Inter-arrival Times)"]
-    CSV["CSV Files<br>(Pre-processed Features with Fusion Scores)"]
-    
-    subgraph RealTimePipeline["Real-time Pipeline"]
-        Engine["Real-time Data Stream /<br>Threat Scoring Engine"]
-        WS["WebSocket Server<br>(Real-time Communication)"]
-    end
+![ZeroTrust-AI Architecture](./zerotrust_architecture.png)
 
-    subgraph Stage1Lenses["Stage 1: Anomaly Experts Group"]
-        AE["Autoencoder<br>(Anomaly Detection)"]
-        GAN["GAN Discriminator<br>(Attack Pattern Recognition)"]
-    end
+#### 📥 1. DATA INGESTION & PROCESSING
+*   `[Ingest]` **PCAP Capture Files** — Raw network packet captures from interfaces.
+*   `[Process]` **SPLT Feature Extraction** — Derives packet lengths and inter-arrival time sequences.
+*   `[Output]` **CSV Files** — Pre-processed features streams with base fusion weights.
+        ↓
+#### 🧠 2. STAGE 1: THREAT ANALYSIS LENSES (ANOMALY EXPERTS)
+*   **Anomaly Expert Group:**
+    *   `[Lens 1]` **Autoencoder** — Unsupervised anomaly detection via reconstruction error.
+    *   `[Lens 2]` **GAN Discriminator** — Classifies adversarial synthetic attack patterns.
+*   **Sequence Modeling:**
+    *   `[Lens 3]` **TCN Model** — Detects complex temporal sequential flows across time windows.
+        ↓
+#### ⚖️ 3. CONSENSUS & ZERO TRUST FUSION
+*   `[Consensus]` **AE + GAN Consensus** — Fuses anomaly outputs from the Autoencoder and GAN lenses.
+*   `[Fusion]` **MLP Classifier (Zero Trust Fusion)** — Merges consensus anomaly scores with raw TCN sequence scores. Utilizes an **Adaptive Threshold of 0.40** to make the final malicious verdict.
+        ↓
+#### 🚀 4. REAL-TIME SOAR & VISUALIZATION
+*   `[Streaming]` **WebSocket Server** — Channels live scoring data streams.
+*   `[Dashboard]` **ZeroTrust Dashboard** — Displays live threat monitoring and prediction metrics.
+*   `[PEP Action]` **Automated Response** — Triggers immediate IP blocking and security containment.
 
-    TCN["TCN Model<br>(Temporal Convolutional Network)"]
-    
-    subgraph Stage1Consensus["Stage 1 Consensus Evaluation"]
-        Consensus["AE + GAN Consensus<br>(Anomaly Expert Output)"]
-    end
-    
-    subgraph Stage2["Stage 2: Zero Trust Fusion"]
-        MLP["MLP Classifier<br>(Meta-Fuser with Adaptive Threshold: 0.40)"]
-    end
-
-    subgraph SOAR["SOAR Integration"]
-        SecOrch["Security Orchestration<br>Automation & Response<br>(Threat Mitigation Actions)"]
-    end
-
-    subgraph Vis["Output & Visualization"]
-        Dash["ZeroTrust Dashboard<br>(Real-time Threat Monitoring)"]
-        Alerts["Threat Alerts<br>(Benign/Malicious Predictions, Confidence Scores)"]
-        AutoResponse["Automated Response<br>(Block/IP Blocking, Alert Generation)"]
-    end
-
-    %% Connections
-    PCAP --> SPLT
-    SPLT --> CSV
-    CSV --> Engine
-    
-    %% Real-time engine feeds models
-    Engine --> AE
-    Engine --> TCN
-    Engine --> GAN
-    
-    %% Stage 1 model interactions
-    TCN --> AE
-    TCN --> GAN
-    
-    %% Stage 1 Consensus
-    AE --> Consensus
-    GAN --> Consensus
-    TCN --> Consensus
-    
-    %% Stage 2 Fusion
-    Consensus --> MLP
-    TCN --> MLP
-    MLP --> Engine
-    
-    %% WebSocket and downstream
-    Engine --> WS
-    WS --> SecOrch
-    WS --> Dash
-    WS --> Alerts
-    
-    SecOrch --> AutoResponse
-    Alerts --> AutoResponse
-
-    %% Style Classes for Beautiful Custom Colors
-    classDef inputStyle fill:#d6eaf8,stroke:#2e86c1,stroke-width:2px,color:#1b4f72;
-    classDef procStyle fill:#ebdcf9,stroke:#6c3483,stroke-width:2px,color:#4a235a;
-    classDef modelStyle fill:#f5eef8,stroke:#8e44ad,stroke-width:2px,color:#4a235a;
-    classDef visualStyle fill:#d5f5e3,stroke:#27ae60,stroke-width:2px,color:#145a32;
-    classDef alertStyle fill:#fdebd0,stroke:#d35400,stroke-width:2px,color:#5e2f0d;
-    classDef responseStyle fill:#fadbd8,stroke:#cb4335,stroke-width:2px,color:#78281f;
-
-    %% Assigning Classes
-    class PCAP inputStyle;
-    class CSV inputStyle;
-    class Alerts inputStyle;
-    class SPLT procStyle;
-    class Engine procStyle;
-    class WS procStyle;
-    class SecOrch procStyle;
-    class Consensus procStyle;
-    class MLP procStyle;
-    class AE modelStyle;
-    class GAN modelStyle;
-    class TCN modelStyle;
-    class Dash visualStyle;
-    class AutoResponse responseStyle;
-```
 
 ### 🔍 1. Hierarchical Meta-Fuser Architecture
 The threat scoring system employs a hierarchical multi-stage evaluation:
