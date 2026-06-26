@@ -50,10 +50,10 @@ graph TD
     SPLT --> CSV
     CSV --> Engine
     
-    %% Real-time engine <-> Models bidirectional/loop
-    Engine <--> AE
-    Engine <--> TCN
-    Engine <--> GAN
+    %% Real-time engine feeds models
+    Engine --> AE
+    Engine --> TCN
+    Engine --> GAN
     
     %% Stage 1 model interactions
     TCN --> AE
@@ -87,9 +87,18 @@ graph TD
     classDef responseStyle fill:#fadbd8,stroke:#cb4335,stroke-width:2px,color:#78281f;
 
     %% Assigning Classes
-    class PCAP,CSV,Alerts inputStyle;
-    class SPLT,Engine,WS,SecOrch,Consensus,MLP procStyle;
-    class AE,GAN,TCN modelStyle;
+    class PCAP inputStyle;
+    class CSV inputStyle;
+    class Alerts inputStyle;
+    class SPLT procStyle;
+    class Engine procStyle;
+    class WS procStyle;
+    class SecOrch procStyle;
+    class Consensus procStyle;
+    class MLP procStyle;
+    class AE modelStyle;
+    class GAN modelStyle;
+    class TCN modelStyle;
     class Dash visualStyle;
     class AutoResponse responseStyle;
 ```
