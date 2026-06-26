@@ -20,23 +20,19 @@ graph TD
         WS["WebSocket Server<br>(Real-time Communication)"]
     end
 
-    subgraph MetaFuser["Hierarchical Meta-Fuser Architecture"]
-        subgraph Stage1["Stage 1: Threat Analysis Lenses"]
-            subgraph AnomalyExperts["Anomaly Detection Experts"]
-                AE["Autoencoder<br>(Anomaly Detection)"]
-                GAN["GAN Discriminator<br>(Attack Pattern Recognition)"]
-            end
-            
-            TCN["TCN Model<br>(Temporal Convolutional Network)"]
-        end
-        
-        subgraph Stage1Consensus["Stage 1 Consensus"]
-            Consensus["AE + GAN Consensus<br>(Anomaly Expert Output)"]
-        end
-        
-        subgraph Stage2["Stage 2: Zero Trust Fusion"]
-            MLP["MLP Classifier<br>(Meta-Fuser with Adaptive Threshold: 0.40)"]
-        end
+    subgraph Stage1Lenses["Stage 1: Anomaly Experts Group"]
+        AE["Autoencoder<br>(Anomaly Detection)"]
+        GAN["GAN Discriminator<br>(Attack Pattern Recognition)"]
+    end
+
+    TCN["TCN Model<br>(Temporal Convolutional Network)"]
+    
+    subgraph Stage1Consensus["Stage 1 Consensus Evaluation"]
+        Consensus["AE + GAN Consensus<br>(Anomaly Expert Output)"]
+    end
+    
+    subgraph Stage2["Stage 2: Zero Trust Fusion"]
+        MLP["MLP Classifier<br>(Meta-Fuser with Adaptive Threshold: 0.40)"]
     end
 
     subgraph SOAR["SOAR Integration"]
