@@ -163,12 +163,87 @@ async def ingest_threat_event(threat_data: Dict[str, Any]):
     if not threat.attack_type:
         threat.attack_type = classify_attack_type(threat)
     
-    # Auto-block high severity threats
-    if (not threat.blocked) and threat.severity in ('high', 'critical') and threat.confidence > 0.8:
-        threat.blocked = True
+    # --- PRODUCTION-GRADE REDIS SOAR ENFORCEMENT & ESCALATION ---
+    source_ip = threat.source_ip
+    if source_ip and redis_storage.redis_client:
+        try:
+            blocked_key = f"blocked:{source_ip}"
+            risk_key = f"risk:{source_ip}"
+            
+            # Check if this IP is already blocked
+            is_blocked = redis_storage.redis_client.exists(blocked_key)
+            if is_blocked:
+                threat.blocked = True
+                
+            # Case 1: High/Critical threat -> Auto-block immediately (TTL 24 hours)
+            elif threat.severity in ('high', 'critical') and threat.confidence > 0.8:
+                threat.blocked = True
+                block_data = {
+                    "ip_address": source_ip,
+                    "reason": f"Auto-blocked: High severity threat ({threat.attack_type})",
+                    "blocked_at": datetime.now().isoformat(),
+                    "blocked_until": (datetime.now() + timedelta(hours=24)).isoformat(),
+                    "blocked_by": "AI-AutoBlocker",
+                    "status": "active"
+                }
+                redis_storage.redis_client.hset(blocked_key, mapping=block_data)
+                redis_storage.redis_client.expire(blocked_key, 24 * 3600)
+                # Cleanup risk watch key if it was blocked
+                redis_storage.redis_client.delete(risk_key)
+                
+            # Case 2: Medium threat -> Check watch list / probation window
+            elif threat.severity == 'medium':
+                # Check if this IP is already on the watch list (probation)
+                offense_count_str = redis_storage.redis_client.get(risk_key)
+                
+                if offense_count_str:
+                    # Repeat offense in the 30-minute watch window! Escalate and Block.
+                    offenses = int(offense_count_str) + 1
+                    if offenses >= 3: # 3 strikes and you are out!
+                        threat.blocked = True
+                        threat.severity = "high"
+                        block_data = {
+                            "ip_address": source_ip,
+                            "reason": f"Auto-blocked: Repeat offenses ({offenses} strikes) in 30-min window",
+                            "blocked_at": datetime.now().isoformat(),
+                            "blocked_until": (datetime.now() + timedelta(hours=24)).isoformat(),
+                            "blocked_by": "AI-AutoBlocker-Escalated",
+                            "status": "active"
+                        }
+                        redis_storage.redis_client.hset(blocked_key, mapping=block_data)
+                        redis_storage.redis_client.expire(blocked_key, 24 * 3600)
+                        redis_storage.redis_client.delete(risk_key)
+                    else:
+                        # Increment strikes and refresh the sliding watch window (Dynamic TTL)
+                        redis_storage.redis_client.set(risk_key, str(offenses), ex=1800) # 30 minutes
+                else:
+                    # First time suspicious: Add to watch list (1 strike) with 30-minute TTL
+                    redis_storage.redis_client.set(risk_key, "1", ex=1800) # 30 minutes
+        except Exception as re:
+            print(f"SOAR Redis logic error: {re}")
+
+    # Synchronize internal set
+    if threat.blocked:
         manager.blocked_flows.add(threat.flow_id)
     
-    # Add to history
+    # Store the parsed event in Redis event list history
+    try:
+        redis_storage.store_event({
+            "flow_id": threat.flow_id,
+            "label": threat.label,
+            "confidence": threat.confidence,
+            "severity": threat.severity,
+            "reason": threat.reason,
+            "timestamp": threat.timestamp,
+            "attack_type": threat.attack_type,
+            "source_ip": threat.source_ip,
+            "destination_ip": threat.destination_ip,
+            "blocked": threat.blocked
+        })
+    except Exception as se:
+        print(f"Failed to record event to Redis history: {se}")
+
+    # Add to in-memory history
     manager.threat_history.append(threat)
     manager.total_flows += 1
     
